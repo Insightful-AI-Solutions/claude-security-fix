@@ -112,6 +112,11 @@ export function buildPrompt({ ids, projectDirs, codePaths, followup, notes, note
   return lines.join("\n");
 }
 
+// Where a person with write access asked for a fix, once that is known. If the
+// gate then fails, for example because GitHub cannot be reached, the request
+// still gets an answer and its done marker.
+let askedOn = null;
+
 async function main() {
   const ev = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
   const name = process.env.GITHUB_EVENT_NAME;
@@ -126,15 +131,16 @@ async function main() {
   let issue, followup = null, notes = "", checks = [];
   // From here on a person with write access has asked for a fix, so say why if it stops.
   let tellOn = null;
+  askedOn = null;
   if (name === "issues") {
     if (ev.action !== "labeled" || ev.label?.name !== "security") stop("not the security label being added");
     issue = ev.issue;
     if (!/@claude\b/i.test(issue.body || "")) stop("the issue does not mention @claude");
-    tellOn = Number(issue.number);
+    tellOn = askedOn = Number(issue.number);
   } else if (name === "issue_comment") {
     if (ev.action !== "created") stop("not a new comment");
     if (!/@claude\b/i.test(ev.comment?.body || "")) stop("the comment does not mention @claude");
-    tellOn = Number(ev.issue.number);
+    tellOn = askedOn = Number(ev.issue.number);
     notes = notesFrom(ev.comment.body);
     if (ev.issue.pull_request) {
       const pr = await api(`pulls/${ev.issue.number}`);
@@ -189,6 +195,7 @@ async function main() {
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((e) => {
     console.error(e.message);
+    if (askedOn) stop("GitHub could not be reached while the request was checked. Try again in a few minutes", askedOn);
     process.exit(1);
   });
 }

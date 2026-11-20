@@ -149,6 +149,12 @@ function audit(d, fromBase) {
   }
 }
 
+// The problems are posted in a comment. They can quote text Claude wrote, such as
+// a key in package.json, so they get the same cleaning as the pull request body.
+// The workflow keeps plain ASCII only, so the mention guard is a space here.
+export const safeProblem = (p) => neutralise(String(p)).replace(/\u200b/g, " ").replace(/[^\x20-\x7e]/g, " ").slice(0, 600);
+const safeProblems = () => problems.map(safeProblem).join("\n");
+
 function main() {
   mkdirSync(outDir, { recursive: true });
   const baseSha = readBundle("base.sha", 100).trim();
@@ -268,7 +274,7 @@ function main() {
   const sha256 = createHash("sha256").update(readFileSync(join(outDir, "change.patch"))).digest("hex");
 
   out("ok", problems.length ? "false" : "true");
-  out("problems", problems.join("\n"));
+  out("problems", safeProblems());
   out("changed", changed ? "true" : "false");
   out("sha256", sha256);
   out("title", title);
@@ -285,7 +291,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   } catch (e) {
     problems.push(`verify failed: ${e.message}`);
     out("ok", "false");
-    out("problems", problems.join("\n"));
+    out("problems", safeProblems());
     console.error("Refused:\n- " + problems.join("\n- "));
     process.exit(1);
   }

