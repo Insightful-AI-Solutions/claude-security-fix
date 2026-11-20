@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { allowed } from "../tools/bash-guard.mjs";
 import {
-  isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, lockVersions, lockResolutions, lockDowngrades, compareVersions, openEnded, neutralise,
+  isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, lockVersions, lockResolutions, lockDowngrades, compareVersions, openEnded, pnpmWorkspace, neutralise,
   pathProblems, patchShapeProblems, credentialProblems, cleanTitle,
 } from "../tools/checks.mjs";
 import { auditCounts, safeProblem } from "../tools/verify.mjs";
@@ -211,6 +211,12 @@ t("problems posted in a comment are cleaned", () => {
   const p = safeProblem('package.json: the key "![x](https://evil/p.png?d=abc)" appears twice. cc @someone ![y][r] <img src=x> fixes #3');
   assert.ok(!p.includes("![") && !p.includes("evil/p.png") && !p.includes("<img") && !/@someone/.test(p) && !/#3/.test(p), p);
   assert.ok(/^[\x20-\x7e]*$/.test(p));
+});
+t("a pnpm workspace file that lists packages is spotted", () => {
+  assert.ok(pnpmWorkspace("packages:\n  - 'apps/*'\n"));
+  assert.ok(pnpmWorkspace("onlyBuiltDependencies:\n  - esbuild\npackages :\n  - a\n"));
+  assert.ok(!pnpmWorkspace("onlyBuiltDependencies:\n  - esbuild\n"));
+  assert.ok(!pnpmWorkspace(""));
 });
 t("paths", () => {
   const o = { pm: "npm", projectDirs: [".", "scripts/baseline"], codePaths: ["src/"], protectedPaths: ["src/content/"] };

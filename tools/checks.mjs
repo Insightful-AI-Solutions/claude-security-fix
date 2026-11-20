@@ -373,6 +373,10 @@ export function lockDowngrades(pm, baseLock, newLock) {
   return bad;
 }
 
+// True when a pnpm-workspace.yaml lists workspace packages. The same file can also
+// hold only settings, which is fine.
+export const pnpmWorkspace = (text) => /^packages\s*:/m.test(String(text ?? ""));
+
 // ---------- package.json ----------
 
 // Names in an override key: "a", "a@^1", "@s/a@1", pnpm's "parent>child" and npm's ".".

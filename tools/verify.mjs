@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
-  LOCKFILES, buildPackageJson, cleanTitle, credentialProblems, lockDowngrades, lockPackageNames, neutralise, pathProblems, patchShapeProblems,
+  LOCKFILES, buildPackageJson, cleanTitle, credentialProblems, lockDowngrades, lockPackageNames, neutralise, pnpmWorkspace, pathProblems, patchShapeProblems,
 } from "./checks.mjs";
 
 const env = process.env;
@@ -220,6 +220,13 @@ function main() {
         writeFileSync(join(ws, pj), built.text);
         if (!built.changed) continue;
         if (/"(workspaces)"\s*:/.test(built.text)) { problems.push(`${pj}: workspaces are not supported`); continue; }
+        // The lockfile is rebuilt from this one package.json alone. In a workspace
+        // that would drop every other project from the shared lockfile.
+        const show = (f) => { try { return git(["show", `HEAD:${f}`], { stdio: ["ignore", "pipe", "ignore"] }); } catch { return ""; } };
+        const inWorkspace =
+          (pm === "pnpm" && [rel(d, "pnpm-workspace.yaml"), "pnpm-workspace.yaml"].some((f) => pnpmWorkspace(show(f)))) ||
+          (d !== "." && /"(workspaces)"\s*:/.test(show("package.json")));
+        if (inWorkspace) { problems.push(`${pj}: workspaces are not supported`); continue; }
         const rebuilt = rebuildLockfile(d, built.text);
         if (rebuilt !== null) writeFileSync(join(ws, rel(d, LOCKFILES[pm])), rebuilt);
         else continue;
