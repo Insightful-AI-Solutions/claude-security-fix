@@ -1,0 +1,45 @@
+name: Claude security fix
+
+# Starts the shared Claude security-fix workflow. It runs when a person with
+# write access opens an issue labelled "security" that mentions @claude and
+# lists GHSA or CVE IDs, or mentions @claude in a comment on that issue or on
+# the pull request the workflow opened. See the shared workflow for how it works.
+
+on:
+  # "labeled", not "opened": GitHub can send "opened" before the label is on the
+  # issue, and it always sends "labeled" when the security label is added.
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  group: claude-security-fix-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    # A quick first filter so most events start nothing. The gate job checks
+    # write access properly, through GitHub's permission API.
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'security') ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
+    uses: OWNER/REPO/.github/workflows/claude-security-fix.yml@SHA
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+      checks: read
+    with:
+      tools-repo: OWNER/REPO
+      tools-ref: SHA
+      package-manager: npm
+      project-dirs: "."
+      code-paths: ""
+      ci-workflows: ci.yml
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}

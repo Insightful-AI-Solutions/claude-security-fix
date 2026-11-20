@@ -1,0 +1,485 @@
+name: Claude security fix (shared)
+
+# Fixes Dependabot alerts with Claude Code, in four jobs with separate powers:
+#
+#   gate     read-only    Decides whether to run. Checks the person asking and
+#                         the issue author have write access, reads only the
+#                         alert IDs (GHSA/CVE) from the issue, and builds
+#                         Claude's prompt from fixed text plus those IDs.
+#   fix      read-only    Claude edits package.json and the lockfile. Its
+#                         GitHub token cannot change the repository, and a
+#                         command guard allows only safe-pm and four git
+#                         commands. The change leaves as a patch file.
+#   verify   read-only    No Claude. Checks the patch touches only allowed
+#                         files and changes only dependency versions in
+#                         package.json, from the npm registry only. Throws away
+#                         Claude's lockfile and rebuilds it from package.json
+#                         with the package manager (scripts off, no tokens), so
+#                         a lockfile can never be edited by hand. Audits the
+#                         result and adds the counts to the pull request.
+#   publish  write        No Claude and no package manager. Re-checks the patch,
+#                         commits, pushes, opens or updates the pull request and
+#                         starts CI.
+#   report   issues       Says on the issue or pull request if a job failed.
+#
+# Callers pin this file and the kit to the same commit SHA.
+
+on:
+  workflow_call:
+    inputs:
+      package-manager:
+        description: npm, pnpm or bun
+        required: true
+        type: string
+      project-dirs:
+        description: Project folders with their own package.json and lockfile, space-separated
+        default: "."
+        type: string
+      code-paths:
+        description: Path prefixes where small code changes are allowed, space-separated (empty means none)
+        default: ""
+        type: string
+      protected-paths:
+        description: Extra paths a security fix may never change, space-separated
+        default: ""
+        type: string
+      ci-workflows:
+        description: CI workflow files to start on the pull request (each needs workflow_dispatch)
+        default: ""
+        type: string
+      task-id:
+        description: '"required" if the issue title must start with a monday Task ID and Record ID'
+        default: "none"
+        type: string
+      task-file:
+        description: File whose first commit names the task, for example .github/CURRENT_TASK
+        default: ""
+        type: string
+      node-version-file:
+        default: ".nvmrc"
+        type: string
+      node-version:
+        default: ""
+        type: string
+      pnpm-version:
+        description: pnpm version for pnpm/action-setup. Leave empty to use the packageManager field.
+        default: ""
+        type: string
+      bun-version-file:
+        default: ".bun-version"
+        type: string
+      show-full-output:
+        description: Show Claude's full output in the log. For debugging in a test repository only.
+        default: false
+        type: boolean
+      tools-repo:
+        description: The repository holding this workflow and its kit
+        required: true
+        type: string
+      tools-ref:
+        description: Full commit SHA of the kit, the same one the caller pins
+        required: true
+        type: string
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      CODEX_REVIEW_TOKEN:
+        description: Optional. A fine-grained token, limited to pull request comments, used only to ask Codex to review.
+        required: false
+
+permissions: {}
+
+env:
+  # Hash of tools/ at this commit. CI checks it is current (test/tools-hash.sh).
+  KIT_TOOLS_SHA256: 74752011e0ca4b34e781401094092cbdeb63fdb5637b2204a0c0107d40cfda0e
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      tell: ${{ steps.gate.outputs.tell }}
+      tell_on: ${{ steps.gate.outputs.tell_on }}
+      reason: ${{ steps.gate.outputs.reason }}
+      mode: ${{ steps.gate.outputs.mode }}
+      issue: ${{ steps.gate.outputs.issue }}
+      pr: ${{ steps.gate.outputs.pr }}
+      checkout_ref: ${{ steps.gate.outputs.checkout_ref }}
+      branch: ${{ steps.gate.outputs.branch }}
+      task_id: ${{ steps.gate.outputs.task_id }}
+      record_id: ${{ steps.gate.outputs.record_id }}
+      ids: ${{ steps.gate.outputs.ids }}
+      prompt: ${{ steps.gate.outputs.prompt }}
+    steps:
+      - name: Get the kit
+        env:
+          TOOLS_REPO: ${{ inputs.tools-repo }}
+          TOOLS_REF: ${{ inputs.tools-ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TOOLS_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "tools-ref must be a full commit SHA"; exit 1; }
+          [[ "$TOOLS_REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "bad tools-repo"; exit 1; }
+          kit="$RUNNER_TEMP/claude-fix/kit"
+          mkdir -p "$kit" && cd "$kit" && git init -q
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$auth" fetch -q --depth 1 "https://github.com/$TOOLS_REPO" "$TOOLS_REF"
+          git checkout -q FETCH_HEAD
+          rm -rf .git
+          # The tools must be the ones this workflow file was written for.
+          got="$(cd "$kit/tools" && LC_ALL=C sha256sum -- * | sha256sum | cut -d' ' -f1)"
+          [ "$got" = "$KIT_TOOLS_SHA256" ] || { echo "tools-ref does not match this workflow: pin both to the same commit"; exit 1; }
+          chmod -R a-w "$kit"
+      - id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GATE_TASK_ID: ${{ inputs.task-id }}
+          GATE_PROJECT_DIRS: ${{ inputs.project-dirs }}
+          GATE_CODE_PATHS: ${{ inputs.code-paths }}
+        run: node "$RUNNER_TEMP/claude-fix/kit/tools/gate.mjs"
+
+  fix:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The token here cannot change the repository: Claude has nothing worth stealing.
+    # pull-requests: read lets the action check a pull request is not from a fork.
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      base_sha: ${{ steps.base.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Get the kit
+        env:
+          TOOLS_REPO: ${{ inputs.tools-repo }}
+          TOOLS_REF: ${{ inputs.tools-ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TOOLS_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "tools-ref must be a full commit SHA"; exit 1; }
+          [[ "$TOOLS_REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "bad tools-repo"; exit 1; }
+          kit="$RUNNER_TEMP/claude-fix/kit"
+          mkdir -p "$kit" && cd "$kit" && git init -q
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$auth" fetch -q --depth 1 "https://github.com/$TOOLS_REPO" "$TOOLS_REF"
+          git checkout -q FETCH_HEAD
+          rm -rf .git
+          # The tools must be the ones this workflow file was written for.
+          got="$(cd "$kit/tools" && LC_ALL=C sha256sum -- * | sha256sum | cut -d' ' -f1)"
+          [ "$got" = "$KIT_TOOLS_SHA256" ] || { echo "tools-ref does not match this workflow: pin both to the same commit"; exit 1; }
+          chmod -R a-w "$kit"
+
+      - id: base
+        name: Record the base and the default branch's config files
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DIRS: ${{ inputs.project-dirs }}
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          for d in $DIRS; do
+            [[ "$d" =~ ^[A-Za-z0-9._/-]+$ && "$d" != *..* ]] || { echo "bad project dir $d"; exit 1; }
+            mkdir -p "$RUNNER_TEMP/claude-fix/pm-base/$d"
+            for f in .npmrc .pnpmfile.cjs .pnpmfile.mjs pnpm-workspace.yaml bunfig.toml .yarnrc .yarnrc.yml npm-shrinkwrap.json; do
+              p="$f"; [ "$d" = "." ] || p="$d/$f"
+              git show "origin/$DEFAULT_BRANCH:$p" > "$RUNNER_TEMP/claude-fix/pm-base/$d/$f" 2>/dev/null || rm -f "$RUNNER_TEMP/claude-fix/pm-base/$d/$f"
+            done
+          done
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ inputs.node-version == '' && inputs.node-version-file || '' }}
+          node-version: ${{ inputs.node-version }}
+          package-manager-cache: false
+      - if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - if: inputs.package-manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: ${{ inputs.bun-version-file }}
+
+      - name: Install safe-pm and the command guard
+        env:
+          PM: ${{ inputs.package-manager }}
+          DIRS: ${{ inputs.project-dirs }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/claude-fix"; bin="$root/bin"; tools="$root/kit/tools"
+          # The cache sits outside $root: $root is read-only to Claude's commands,
+          # and a writable folder inside a read-only one stays read-only.
+          mkdir -p "$bin" "$RUNNER_TEMP/claude-fix-cache"
+          {
+            echo '#!/usr/bin/env bash'
+            printf 'export SAFE_PM_PM=%q SAFE_PM_DIRS=%q SAFE_PM_WORKSPACE=%q SAFE_PM_BASE=%q SAFE_PM_TOOLS=%q SAFE_PM_CACHE=%q\n' \
+              "$PM" "$DIRS" "$GITHUB_WORKSPACE" "$root/pm-base" "$tools" "$RUNNER_TEMP/claude-fix-cache"
+            printf 'exec bash %q "$@"\n' "$tools/safe-pm.sh"
+          } > "$bin/safe-pm"
+          {
+            echo '#!/usr/bin/env bash'
+            printf 'export SAFE_PM_DIRS=%q\n' "$DIRS"
+            printf 'exec node %q\n' "$tools/bash-guard.mjs"
+          } > "$bin/claude-bash-guard"
+          chmod 555 "$bin/safe-pm" "$bin/claude-bash-guard" && chmod 555 "$bin"
+          chmod -R a-w "$root/pm-base"
+          echo "$bin" >> "$GITHUB_PATH"
+          mkdir -p .claude-pr
+
+      - id: settings
+        name: Write Claude's settings
+        env:
+          CS_WORKSPACE: ${{ github.workspace }}
+        run: CS_ROOT="$RUNNER_TEMP/claude-fix" CS_CACHE="$RUNNER_TEMP/claude-fix-cache" node "$RUNNER_TEMP/claude-fix/kit/tools/claude-settings.mjs"
+
+      # Claude's shell commands run in Claude Code's sandbox, which needs bubblewrap.
+      # Docker is stopped and its socket removed: the runner user can reach it, and
+      # through it the whole machine, so nothing in Claude's job may see it.
+      - name: Install the sandbox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          sudo systemctl stop docker.socket docker.service containerd.service 2>/dev/null || true
+          sudo rm -f /var/run/docker.sock /run/docker.sock
+          if [ -S /var/run/docker.sock ] || [ -S /run/docker.sock ]; then echo "Docker socket still present"; exit 1; fi
+
+      - id: claude
+        uses: anthropics/claude-code-action@f431adaf77e0fecf918431e75a2b5b45b85af002 # v1.0.283
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The job's own read-only token, so no app token with write access is minted.
+          github_token: ${{ github.token }}
+          allow_fork_prs: "false"
+          show_full_output: ${{ inputs.show-full-output }}
+          prompt: ${{ needs.gate.outputs.prompt }}
+          claude_args: >-
+            --permission-mode dontAsk
+            --max-turns 60
+            ${{ steps.settings.outputs.add_dirs }}
+            --settings '${{ steps.settings.outputs.json }}'
+            --disallowedTools "WebFetch,WebSearch,NotebookEdit,PowerShell,Monitor,Read(./.git/**),Edit(./.git/**),Write(./.git/**)"
+            --allowedTools "Read,Grep,Glob,Edit(./**),Write(./**),Bash(safe-pm audit),Bash(safe-pm lock),Bash(safe-pm audit *),Bash(safe-pm lock *),Bash(git status),Bash(git diff),Bash(git diff --staged),Bash(git log --oneline -20)"
+
+      # A fresh clone outside the workspace takes only the files a fix may change.
+      - name: Package the change
+        if: always() && steps.base.outputs.sha != ''
+        env:
+          PKG_WORKSPACE: ${{ github.workspace }}
+          PKG_BASE_SHA: ${{ steps.base.outputs.sha }}
+          PKG_PM: ${{ inputs.package-manager }}
+          PKG_DIRS: ${{ inputs.project-dirs }}
+          PKG_CODE_PATHS: ${{ inputs.code-paths }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: PKG_OUT="$RUNNER_TEMP/out" node "$RUNNER_TEMP/claude-fix/kit/tools/package.mjs"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.base.outputs.sha != ''
+        with:
+          name: claude-change
+          path: ${{ runner.temp }}/out/
+          retention-days: 7
+          if-no-files-found: error
+
+  verify:
+    needs: [gate, fix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      ok: ${{ steps.verify.outputs.ok }}
+      changed: ${{ steps.verify.outputs.changed }}
+      sha256: ${{ steps.verify.outputs.sha256 }}
+      title: ${{ steps.verify.outputs.title }}
+      problems: ${{ steps.verify.outputs.problems }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.fix.outputs.base_sha }}
+          persist-credentials: false
+      - name: Get the kit
+        env:
+          TOOLS_REPO: ${{ inputs.tools-repo }}
+          TOOLS_REF: ${{ inputs.tools-ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TOOLS_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "tools-ref must be a full commit SHA"; exit 1; }
+          [[ "$TOOLS_REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "bad tools-repo"; exit 1; }
+          kit="$RUNNER_TEMP/claude-fix/kit"
+          mkdir -p "$kit" && cd "$kit" && git init -q
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$auth" fetch -q --depth 1 "https://github.com/$TOOLS_REPO" "$TOOLS_REF"
+          git checkout -q FETCH_HEAD
+          rm -rf .git
+          # The tools must be the ones this workflow file was written for.
+          got="$(cd "$kit/tools" && LC_ALL=C sha256sum -- * | sha256sum | cut -d' ' -f1)"
+          [ "$got" = "$KIT_TOOLS_SHA256" ] || { echo "tools-ref does not match this workflow: pin both to the same commit"; exit 1; }
+          chmod -R a-w "$kit"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: claude-change
+          path: ${{ runner.temp }}/bundle
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ inputs.node-version == '' && inputs.node-version-file || '' }}
+          node-version: ${{ inputs.node-version }}
+          package-manager-cache: false
+      - if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - if: inputs.package-manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: ${{ inputs.bun-version-file }}
+      - id: verify
+        env:
+          VERIFY_PM: ${{ inputs.package-manager }}
+          VERIFY_DIRS: ${{ inputs.project-dirs }}
+          VERIFY_CODE_PATHS: ${{ inputs.code-paths }}
+          VERIFY_PROTECTED: ${{ inputs.protected-paths }}
+          VERIFY_BUNDLE: ${{ runner.temp }}/bundle
+          VERIFY_WORKSPACE: ${{ github.workspace }}
+          VERIFY_OUT: ${{ runner.temp }}/verified
+        run: node "$RUNNER_TEMP/claude-fix/kit/tools/verify.mjs"
+      # The change that publish will apply: Claude's edits with the lockfiles rebuilt here.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.verify.outputs.ok == 'true'
+        with:
+          name: verified-change
+          path: ${{ runner.temp }}/verified/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: [gate, fix, verify]
+    if: needs.verify.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.fix.outputs.base_sha }}
+      - name: Get the kit
+        env:
+          TOOLS_REPO: ${{ inputs.tools-repo }}
+          TOOLS_REF: ${{ inputs.tools-ref }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TOOLS_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "tools-ref must be a full commit SHA"; exit 1; }
+          [[ "$TOOLS_REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "bad tools-repo"; exit 1; }
+          kit="$RUNNER_TEMP/claude-fix/kit"
+          mkdir -p "$kit" && cd "$kit" && git init -q
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$auth" fetch -q --depth 1 "https://github.com/$TOOLS_REPO" "$TOOLS_REF"
+          git checkout -q FETCH_HEAD
+          rm -rf .git
+          # The tools must be the ones this workflow file was written for.
+          got="$(cd "$kit/tools" && LC_ALL=C sha256sum -- * | sha256sum | cut -d' ' -f1)"
+          [ "$got" = "$KIT_TOOLS_SHA256" ] || { echo "tools-ref does not match this workflow: pin both to the same commit"; exit 1; }
+          chmod -R a-w "$kit"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-change
+          path: ${{ runner.temp }}/bundle
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
+          PUB_BUNDLE: ${{ runner.temp }}/bundle
+          PUB_WORKSPACE: ${{ github.workspace }}
+          PUB_SHA256: ${{ needs.verify.outputs.sha256 }}
+          PUB_TITLE: ${{ needs.verify.outputs.title }}
+          PUB_CHANGED: ${{ needs.verify.outputs.changed }}
+          PUB_MODE: ${{ needs.gate.outputs.mode }}
+          PUB_BRANCH: ${{ needs.gate.outputs.branch }}
+          PUB_ISSUE: ${{ needs.gate.outputs.issue }}
+          PUB_PR: ${{ needs.gate.outputs.pr }}
+          PUB_IDS: ${{ needs.gate.outputs.ids }}
+          PUB_TASK_ID: ${{ needs.gate.outputs.task_id }}
+          PUB_RECORD_ID: ${{ needs.gate.outputs.record_id }}
+          PUB_TASK_FILE: ${{ inputs.task-file }}
+          PUB_CI_WORKFLOWS: ${{ inputs.ci-workflows }}
+          PUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PUB_PM: ${{ inputs.package-manager }}
+          PUB_DIRS: ${{ inputs.project-dirs }}
+          PUB_CODE_PATHS: ${{ inputs.code-paths }}
+          PUB_PROTECTED: ${{ inputs.protected-paths }}
+        run: node "$RUNNER_TEMP/claude-fix/kit/tools/publish.mjs"
+
+  # Says why a fix did not start, when a person with write access asked for one.
+  not-started:
+    needs: gate
+    if: needs.gate.outputs.tell == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          WHERE: ${{ needs.gate.outputs.tell_on }}
+          REASON: ${{ needs.gate.outputs.reason }}
+        run: |
+          set -euo pipefail
+          [[ "$WHERE" =~ ^[0-9]+$ ]] || exit 1
+          {
+            echo "The Claude security fix did not start: $(printf '%s' "$REASON" | tr -cd '\40-\176' | head -c 300)."
+            echo
+            echo "Fix that, then comment \`@claude\` here to start again."
+          } > msg.md
+          gh api "repos/$GITHUB_REPOSITORY/issues/$WHERE/comments" -F body=@msg.md --jq .html_url
+
+  report:
+    needs: [gate, fix, verify, publish]
+    if: always() && needs.gate.outputs.run == 'true' && (needs.fix.result == 'failure' || needs.verify.result == 'failure' || needs.publish.result == 'failure' || needs.fix.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          WHERE: ${{ needs.gate.outputs.pr || needs.gate.outputs.issue }}
+          FIX: ${{ needs.fix.result }}
+          VERIFY: ${{ needs.verify.result }}
+          PUBLISH: ${{ needs.publish.result }}
+          PROBLEMS: ${{ needs.verify.outputs.problems }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          p="$(printf '%s' "$PROBLEMS" | tr -cd '\11\12\40-\176' | head -c 3000 | sed 's/^/- /')"
+          {
+            echo "The Claude security fix did not finish. Fix: $FIX. Verify: $VERIFY. Publish: $PUBLISH."
+            if [ -n "$PROBLEMS" ]; then echo; echo "Verify refused the change:"; echo; echo "$p"; fi
+            echo; echo "Run: $RUN_URL"
+            echo; echo "<!-- claude-security-fix:done head=unknown -->"
+          } > msg.md
+          gh api "repos/$GITHUB_REPOSITORY/issues/$WHERE/comments" -F body=@msg.md --jq .html_url
