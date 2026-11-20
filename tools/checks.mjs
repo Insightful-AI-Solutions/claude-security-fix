@@ -97,6 +97,20 @@ export function isSemverRange(spec) {
   });
 }
 
+// True when a range has no upper limit: "*", "x", ">=1.2.3" or ">1". A fix must
+// name the version it wants. An open range would take whatever is newest.
+export function openEnded(range) {
+  const s = String(range ?? "").trim();
+  if (s === "" || s === "*") return true;
+  return s.split("||").some((part) => {
+    const p = part.trim().replace(/(<=|>=|<|>|=|~|\^)\s+/g, "$1");
+    if (p === "" || /^v?[xX*](?:\.[xX*]){0,2}$/.test(p)) return true;
+    if (/\s-\s/.test(p)) return false; // "1.0.0 - 2.0.0" has an upper limit
+    const parts = p.split(/\s+/);
+    return parts.some((c) => /^>=?/.test(c)) && !parts.some((c) => /^<=?/.test(c));
+  });
+}
+
 // True when a range starts at a lower version than the range it replaces.
 const firstVersion = (range) => {
   const m = /(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(String(range));
@@ -324,6 +338,23 @@ function overridesProblems(ov, label, { lockNames, directNames, nested }) {
   return bad;
 }
 
+// A new or changed override must name the version it wants.
+function openOverrideProblems(baseOv, nextOv, label) {
+  const bad = [];
+  const walk = (b, n, at, depth) => {
+    if (!n || typeof n !== "object" || Array.isArray(n) || depth > 5) return;
+    for (const [k, v] of Object.entries(n)) {
+      const bv = b && typeof b === "object" ? b[k] : undefined;
+      if (v && typeof v === "object") walk(bv, v, `${at}.${k.slice(0, 80)}`, depth + 1);
+      else if (typeof v === "string" && v !== bv && !v.startsWith("$") && openEnded(v)) {
+        bad.push(`${at}.${k.slice(0, 80)}: the new range has no upper limit. Name the fixed version, for example ^1.2.3`);
+      }
+    }
+  };
+  walk(baseOv, nextOv, label, 0);
+  return bad;
+}
+
 // An override may not move to a lower version than the one it replaces.
 function overrideDowngrades(baseOv, nextOv, label) {
   const bad = [];
@@ -419,6 +450,10 @@ export function buildPackageJson(baseText, claudeText, { pm, lockNames, label = 
         problems.push(`${label} ${f}.${name.slice(0, 80)}: does not come from the registry, so its source may not change. A person handles it`);
         continue;
       }
+      if (openEnded(na ? na.range : n[name])) {
+        problems.push(`${label} ${f}.${name.slice(0, 80)}: the new range has no upper limit. Name the fixed version, for example ^1.2.3`);
+        continue;
+      }
       if (lowers(ba ? ba.range : b[name], na ? na.range : n[name])) {
         problems.push(`${label} ${f}.${name.slice(0, 80)}: lowers the version. A security fix may only raise versions; a person handles a downgrade`);
         continue;
@@ -431,6 +466,7 @@ export function buildPackageJson(baseText, claudeText, { pm, lockNames, label = 
   for (const f of ovFields) {
     problems.push(...sourceOverrideProblems(base[f], next[f], `${label} ${f}`));
     problems.push(...overrideDowngrades(base[f], next[f], `${label} ${f}`));
+    problems.push(...openOverrideProblems(base[f], next[f], `${label} ${f}`));
     problems.push(...overridesProblems(next[f], `${label} ${f}`, { lockNames, directNames, nested: f === "overrides" && pm === "npm" }));
     if (next[f] === undefined) delete out[f];
     else out[f] = next[f];
@@ -438,6 +474,7 @@ export function buildPackageJson(baseText, claudeText, { pm, lockNames, label = 
   if (pm === "pnpm") {
     problems.push(...sourceOverrideProblems(base.pnpm?.overrides, next.pnpm?.overrides, `${label} pnpm.overrides`));
     problems.push(...overrideDowngrades(base.pnpm?.overrides, next.pnpm?.overrides, `${label} pnpm.overrides`));
+    problems.push(...openOverrideProblems(base.pnpm?.overrides, next.pnpm?.overrides, `${label} pnpm.overrides`));
     problems.push(...overridesProblems(next.pnpm?.overrides, `${label} pnpm.overrides`, { lockNames, directNames, nested: false }));
     if (next.pnpm?.overrides === undefined) {
       if (out.pnpm) delete out.pnpm.overrides;
@@ -534,7 +571,8 @@ export function pathProblems(paths, { pm, projectDirs, codePaths = [], protected
     list.some((x) => {
       const leaf = p.split("/").pop();
       if (x.endsWith("/")) return p.startsWith(x) || p.includes("/" + x);
-      return p === x || leaf === x;
+      // A name with no "/" at the end can be a file or a folder. Cover both.
+      return p === x || leaf === x || p.startsWith(x + "/");
     });
   for (const p of paths) {
     if (!/^[A-Za-z0-9._@+\-\/]+$/.test(p) || p.split("/").some((s) => s === ".." || s === "" || s === ".")) {

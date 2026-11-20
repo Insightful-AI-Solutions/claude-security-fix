@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { allowed } from "../tools/bash-guard.mjs";
 import {
-  isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, lockVersions, lockDowngrades, compareVersions, neutralise,
+  isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, lockVersions, lockDowngrades, compareVersions, openEnded, neutralise,
   pathProblems, patchShapeProblems, credentialProblems, cleanTitle,
 } from "../tools/checks.mjs";
 import { auditCounts } from "../tools/verify.mjs";
@@ -103,6 +103,15 @@ t("package.json: a project with a source outside the registry is out of scope", 
     }
   }
 });
+t("package.json: a new range must have an upper limit", () => {
+  for (const r of ["*", "", "x", ">=1.0.1", ">1", ">=1.0.1 || ^2.0.0", ">= 1.0.1"]) assert.ok(openEnded(r), r);
+  for (const r of ["1.0.1", "^1.0.1", "~1.0.1", ">=1.0.1 <2.0.0", "1.0.1 - 1.9.0", "1.x", "^1.0.1 || ^2.0.0", "<=1.5.0"]) assert.ok(!openEnded(r), r);
+  assert.match(build({ ...baseObj, dependencies: { ...baseObj.dependencies, a: "*" } }).problems.join(" "), /no upper limit/);
+  assert.match(build({ ...baseObj, dependencies: { ...baseObj.dependencies, a: ">=1.0.1" } }).problems.join(" "), /no upper limit/);
+  assert.match(build({ ...baseObj, dependencies: { ...baseObj.dependencies, sw: "npm:string-width@>=4.2.3" } }).problems.join(" "), /no upper limit/);
+  assert.match(build({ ...baseObj, overrides: { deep: "*" } }).problems.join(" "), /no upper limit/);
+  assert.match(build({ ...baseObj, pnpm: { overrides: { deep: ">=2.0.0" } } }, "pnpm").problems.join(" "), /no upper limit/);
+});
 t("package.json: an override may not go down", () => {
   const base = JSON.stringify({ name: "x", dependencies: { a: "1.0.0" }, overrides: { deep: "4.0.0", a: { deep: "^2.1.0" } } }, null, 2) + "\n";
   const go = (ov, pm = "npm") => buildPackageJson(base, JSON.stringify({ ...JSON.parse(base), overrides: ov }, null, 2) + "\n", { pm, lockNames });
@@ -186,6 +195,9 @@ t("paths", () => {
   // A path the repository protects stays protected, even if it is a dependency file.
   assert.equal(pathProblems(["scripts/baseline/package.json"], { ...o, protectedPaths: ["scripts/baseline/package.json"] }).length, 1);
   assert.equal(pathProblems(["scripts/baseline/package-lock.json"], { ...o, protectedPaths: ["scripts/baseline/"] }).length, 1);
+  // A protected folder named without the last "/" still covers what is inside it.
+  assert.equal(pathProblems(["src/generated/a.js"], { ...o, codePaths: ["src"], protectedPaths: ["src/generated"] }).length, 1);
+  assert.deepEqual(pathProblems(["src/generated2/a.js"], { ...o, codePaths: ["src"], protectedPaths: ["src/generated"] }), []);
 });
 t("patch shape", () => {
   assert.deepEqual(patchShapeProblems("1\t1\tpackage.json\n3\t2\tpackage-lock.json\n"), { bad: [], paths: ["package.json", "package-lock.json"] });

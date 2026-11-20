@@ -56,7 +56,8 @@ on:
         default: ""
         type: string
       node-version-file:
-        default: ".nvmrc"
+        description: File that names the Node version. Left empty, .nvmrc is used if the repository has one
+        default: ""
         type: string
       node-version:
         default: ""
@@ -91,7 +92,7 @@ permissions: {}
 
 env:
   # Hash of tools/ at this commit. CI checks it is current (test/tools-hash.sh).
-  KIT_TOOLS_SHA256: 8aff42de1f8c3669c34940fd384c37e7755b0828f99ad17e52ff0e730e2def27
+  KIT_TOOLS_SHA256: eec443bfa204bc23bf7f4ba6eceee4e874c56489937e0636d1c570654f7344a1
 
 jobs:
   gate:
@@ -201,9 +202,22 @@ jobs:
             done
           done
 
+      # A set version wins. Then the named file, then .nvmrc if there is one. With
+      # none of them, the runner's own Node is used.
+      - id: node1
+        env:
+          NV: ${{ inputs.node-version }}
+          NVF: ${{ inputs.node-version-file }}
+        run: |
+          file=""
+          if [ -z "$NV" ]; then
+            if [ -n "$NVF" ]; then file="$NVF"; elif [ -f .nvmrc ]; then file=".nvmrc"; fi
+          fi
+          [[ "$file" =~ ^[A-Za-z0-9._/-]*$ ]] || { echo "bad node-version-file"; exit 1; }
+          echo "file=$file" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: ${{ inputs.node-version == '' && inputs.node-version-file || '' }}
+          node-version-file: ${{ steps.node1.outputs.file }}
           node-version: ${{ inputs.node-version }}
           package-manager-cache: false
       - if: inputs.package-manager == 'pnpm'
@@ -339,9 +353,22 @@ jobs:
         with:
           name: claude-change
           path: ${{ runner.temp }}/bundle
+      # A set version wins. Then the named file, then .nvmrc if there is one. With
+      # none of them, the runner's own Node is used.
+      - id: node2
+        env:
+          NV: ${{ inputs.node-version }}
+          NVF: ${{ inputs.node-version-file }}
+        run: |
+          file=""
+          if [ -z "$NV" ]; then
+            if [ -n "$NVF" ]; then file="$NVF"; elif [ -f .nvmrc ]; then file=".nvmrc"; fi
+          fi
+          [[ "$file" =~ ^[A-Za-z0-9._/-]*$ ]] || { echo "bad node-version-file"; exit 1; }
+          echo "file=$file" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: ${{ inputs.node-version == '' && inputs.node-version-file || '' }}
+          node-version-file: ${{ steps.node2.outputs.file }}
           node-version: ${{ inputs.node-version }}
           package-manager-cache: false
       - if: inputs.package-manager == 'pnpm'
@@ -490,6 +517,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$WHERE" =~ ^[0-9]+$ ]] || exit 1
+          # The run may or may not have pushed before it failed. Ask GitHub where the
+          # pull request's head is now, so the marker names it. On an issue, or if
+          # the lookup fails, the head stays unknown.
+          head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$WHERE" --jq .head.sha 2>/dev/null || true)"
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || head=unknown
           # Cut first, with no early-closing pipe: a closed pipe would stop this step
           # before it posts the marker.
           p="$(tr -cd '\11\12\40-\176' <<<"${PROBLEMS:0:3000}" | sed 's/^/- /')"
@@ -498,6 +530,6 @@ jobs:
             if [ -n "$PROBLEMS" ]; then echo; echo "Verify refused the change:"; echo; echo "$p"; fi
             echo; echo "Run: $RUN_URL"
             case "$TRIGGER_COMMENT" in ''|*[!0-9]*) TRIGGER_COMMENT=none ;; esac
-            echo; echo "<!-- claude-security-fix:done head=unknown for=$TRIGGER_COMMENT -->"
+            echo; echo "<!-- claude-security-fix:done head=$head for=$TRIGGER_COMMENT -->"
           } > msg.md
           gh api "repos/$GITHUB_REPOSITORY/issues/$WHERE/comments" -F body=@msg.md --jq .html_url
