@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { allowed } from "../tools/bash-guard.mjs";
 import {
-  isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, lockVersions, lockDowngrades, compareVersions, openEnded, neutralise,
+  isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, lockVersions, lockResolutions, lockDowngrades, compareVersions, openEnded, neutralise,
   pathProblems, patchShapeProblems, credentialProblems, cleanTitle,
 } from "../tools/checks.mjs";
 import { auditCounts } from "../tools/verify.mjs";
@@ -142,6 +142,22 @@ t("lockfiles: no package may resolve to an older version", () => {
   const bun = (v) => `{\n  "packages": {\n    "a": ["a@${v}", "", {}, "sha512-x"],\n    "@s/b": ["@s/b@2.0.0", "", {}, "sha512-y"],\n  },\n}\n`;
   assert.equal(lockDowngrades("bun", bun("1.5.0"), bun("1.4.0")).length, 1);
   assert.deepEqual(lockDowngrades("bun", bun("1.5.0"), bun("1.5.0")), []);
+  // One copy goes down while another goes up: the set of versions hides it, the places do not.
+  const swap = (top, nested) => JSON.stringify({ lockfileVersion: 3, packages: { "": {}, "node_modules/a": { version: top }, "node_modules/x/node_modules/a": { version: nested } } });
+  assert.equal(lockDowngrades("npm", swap("2.0.0", "1.0.0"), swap("1.0.0", "3.0.0")).length, 1);
+  const v1swap = (top, nested) => JSON.stringify({ lockfileVersion: 1, dependencies: { a: { version: top }, x: { version: "1.0.0", dependencies: { a: { version: nested } } } } });
+  assert.equal(lockDowngrades("npm", v1swap("2.0.0", "1.0.0"), v1swap("1.0.0", "3.0.0")).length, 1);
+  const bswap = (top, nested) => `{\n  "packages": {\n    "a": ["a@${top}", "", {}, "sha512-x"],\n    "x/a": ["a@${nested}", "", {}, "sha512-y"],\n  },\n}\n`;
+  assert.equal(lockDowngrades("bun", bswap("2.0.0", "1.0.0"), bswap("1.0.0", "3.0.0")).length, 1);
+  assert.deepEqual(lockDowngrades("bun", bswap("2.0.0", "1.0.0"), bswap("2.0.1", "1.0.0")), []);
+  const p9 = (direct, other) => `lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      a:\n        specifier: ^1.0.0\n        version: ${direct}(react@19.0.0)\n      '@s/b':\n        specifier: 1.0.0\n        version: 1.0.0\n\npackages:\n\n  a@${direct}:\n    resolution: {integrity: sha512-x}\n\n  a@${other}:\n    resolution: {integrity: sha512-y}\n\n  '@s/b@1.0.0':\n    resolution: {integrity: sha512-z}\n`;
+  assert.equal(lockResolutions("pnpm", p9("2.0.0", "1.0.0")).get(".|a"), "2.0.0");
+  assert.equal(lockResolutions("pnpm", p9("2.0.0", "1.0.0")).get(".|@s/b"), "1.0.0");
+  assert.equal(lockDowngrades("pnpm", p9("2.0.0", "1.0.0"), p9("1.0.0", "3.0.0")).length, 1);
+  assert.deepEqual(lockDowngrades("pnpm", p9("2.0.0", "1.0.0"), p9("2.0.1", "1.0.0")), []);
+  const p5d = (v) => `lockfileVersion: 5.4\n\nspecifiers:\n  a: ^1.0.0\n\ndependencies:\n  a: ${v}\n\npackages:\n\n  /a/${v}:\n    dev: false\n\n  /a/9.0.0:\n    dev: false\n`;
+  assert.equal(lockResolutions("pnpm", p5d("2.0.0")).get(".|a"), "2.0.0");
+  assert.equal(lockDowngrades("pnpm", p5d("2.0.0"), p5d("1.0.0")).length, 1);
   assert.ok(compareVersions("1.0.0-alpha.2", "1.0.0-alpha.10") < 0 && compareVersions("1.0.0-rc.1", "1.0.0") < 0 && compareVersions("1.10.0", "1.9.0") > 0);
 });
 t("audit output must look like a real audit result", () => {

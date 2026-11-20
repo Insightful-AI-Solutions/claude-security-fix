@@ -281,11 +281,78 @@ export function compareVersions(a, b) {
   return 0;
 }
 
-// The real test for a downgrade: compare what the two lockfiles resolve to. For
-// each package in both, neither its lowest nor its highest version may go down.
-// This catches any range wording that would pull an older release in.
+// The version at each place in a lockfile: Map of place -> version. A place is a
+// folder in the installed tree (npm, Bun) or a project's own dependency (pnpm).
+// Comparing place by place catches a copy that goes down while another goes up.
+export function lockResolutions(pm, text) {
+  const map = new Map();
+  const put = (place, version) => {
+    const v = String(version ?? "").replace(/^'|'$/g, "").replace(/[(_+].*$/, "");
+    if (VERSION.test(v)) map.set(place, v);
+  };
+  if (!text) return map;
+  if (pm === "npm") {
+    const l = JSON.parse(text);
+    for (const [k, v] of Object.entries(l.packages || {})) if (k && !v?.link) put(k, v?.version);
+    const walk = (deps, at, depth) => {
+      if (!deps || typeof deps !== "object" || depth > 50) return;
+      for (const [k, v] of Object.entries(deps)) {
+        if (!l.packages) put(`${at}node_modules/${k}`, v?.version);
+        walk(v?.dependencies, `${at}node_modules/${k}/`, depth + 1);
+      }
+    };
+    walk(l.dependencies, "", 0);
+  } else if (pm === "bun") {
+    const l = JSON.parse(stripJsonc(text));
+    for (const [k, v] of Object.entries(l.packages || {})) {
+      const first = Array.isArray(v) ? String(v[0]) : "";
+      const at = first.lastIndexOf("@");
+      if (at > 0) put(k, first.slice(at + 1));
+    }
+  } else if (pm === "pnpm") {
+    // Each project's own dependencies: under "importers:" in newer lockfiles, or at
+    // the top level in older single-project ones.
+    const FIELD = /^(dependencies|devDependencies|optionalDependencies):\s*$/;
+    let importer = null, field = null, name = null, inImporters = false;
+    for (const raw of text.split("\n")) {
+      const line = raw.replace(/\r$/, "");
+      if (!line.trim()) continue;
+      const indent = line.length - line.trimStart().length;
+      const body = line.trim();
+      if (indent === 0) {
+        inImporters = body === "importers:";
+        importer = inImporters ? null : ".";
+        field = !inImporters && FIELD.test(body) ? body.slice(0, -1) : null;
+        name = null;
+        continue;
+      }
+      const kv = /^'?([^':]+(?::[^':]+)*?)'?:\s*(.*)$/.exec(body);
+      if (inImporters) {
+        if (indent === 2) { importer = body.replace(/:$/, "").replace(/^'|'$/g, ""); field = null; }
+        else if (indent === 4) field = FIELD.test(body) ? body.replace(/:\s*$/, "") : null;
+        else if (indent === 6 && field && kv) { name = kv[1]; if (kv[2]) put(`${importer}|${name}`, kv[2]); }
+        else if (indent === 8 && field && name && kv && kv[1] === "version") put(`${importer}|${name}`, kv[2]);
+      } else if (field) {
+        if (indent === 2 && kv) { name = kv[1]; if (kv[2]) put(`.|${name}`, kv[2]); }
+        else if (indent === 4 && name && kv && kv[1] === "version") put(`.|${name}`, kv[2]);
+      }
+    }
+  }
+  return map;
+}
+
+// The real test for a downgrade: compare what the two lockfiles resolve to.
+// First place by place. Then, for each package, neither its lowest nor its highest
+// version may go down. This catches any range wording that would pull an older
+// release in.
 export function lockDowngrades(pm, baseLock, newLock) {
   const bad = [];
+  const was = lockResolutions(pm, baseLock), now = lockResolutions(pm, newLock);
+  for (const [place, v] of was) {
+    const nv = now.get(place);
+    if (nv && compareVersions(nv, v) < 0) bad.push(`${place.replace(/^.*node_modules\//, "").replace(/^.*\|/, "")} goes down from ${v} to ${nv} at ${place}`);
+  }
+  if (bad.length) return bad;
   const before = lockVersions(pm, baseLock), after = lockVersions(pm, newLock);
   const ends = (set) => {
     const list = [...set].sort(compareVersions);
