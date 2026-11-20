@@ -91,7 +91,7 @@ permissions: {}
 
 env:
   # Hash of tools/ at this commit. CI checks it is current (test/tools-hash.sh).
-  KIT_TOOLS_SHA256: 74752011e0ca4b34e781401094092cbdeb63fdb5637b2204a0c0107d40cfda0e
+  KIT_TOOLS_SHA256: 2eeb65f240a0b4182fa54e968d45c705cade94ce93b312821159ea890c9fe76b
 
 jobs:
   gate:
@@ -411,6 +411,7 @@ jobs:
       - env:
           GITHUB_TOKEN: ${{ github.token }}
           CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
+          TRIGGER_COMMENT: ${{ github.event.comment.id }}
           PUB_BUNDLE: ${{ runner.temp }}/bundle
           PUB_WORKSPACE: ${{ github.workspace }}
           PUB_SHA256: ${{ needs.verify.outputs.sha256 }}
@@ -468,6 +469,7 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           WHERE: ${{ needs.gate.outputs.pr || needs.gate.outputs.issue }}
+          TRIGGER_COMMENT: ${{ github.event.comment.id }}
           FIX: ${{ needs.fix.result }}
           VERIFY: ${{ needs.verify.result }}
           PUBLISH: ${{ needs.publish.result }}
@@ -480,6 +482,7 @@ jobs:
             echo "The Claude security fix did not finish. Fix: $FIX. Verify: $VERIFY. Publish: $PUBLISH."
             if [ -n "$PROBLEMS" ]; then echo; echo "Verify refused the change:"; echo; echo "$p"; fi
             echo; echo "Run: $RUN_URL"
-            echo; echo "<!-- claude-security-fix:done head=unknown -->"
+            case "$TRIGGER_COMMENT" in ''|*[!0-9]*) TRIGGER_COMMENT=none ;; esac
+            echo; echo "<!-- claude-security-fix:done head=unknown for=$TRIGGER_COMMENT -->"
           } > msg.md
           gh api "repos/$GITHUB_REPOSITORY/issues/$WHERE/comments" -F body=@msg.md --jq .html_url

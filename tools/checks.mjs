@@ -182,7 +182,8 @@ export function lockPackageNames(pm, text) {
     }
   } else if (pm === "pnpm") {
     for (const line of text.split("\n")) {
-      const m = /^ {2}'?((?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*)@/i.exec(line);
+      // Newer lockfiles write "name@1.0.0". Older ones write "/name@1.0.0" or "/name/1.0.0".
+      const m = /^ {2}'?\/?((?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*)(?:@|\/\d)/i.exec(line);
       if (m) names.add(m[1].toLowerCase());
     }
   }
@@ -385,7 +386,11 @@ export function pathProblems(paths, { pm, projectDirs, codePaths = [], protected
       bad.push("a changed path has unusual characters");
       continue;
     }
-    if (deps.has(p)) continue;
+    if (deps.has(p)) {
+      // A path the repository itself protects wins over the dependency allowlist.
+      if (hits(p, protectedPaths)) bad.push(`${p}: protected, a security fix may not change it`);
+      continue;
+    }
     if (hits(p, prot)) bad.push(`${p}: protected, a security fix may not change it`);
     else if (!code.some((c) => p.startsWith(c))) bad.push(`${p}: outside the paths a security fix may change`);
   }

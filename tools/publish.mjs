@@ -39,7 +39,10 @@ async function gh(method, path, body, token = env.GITHUB_TOKEN) {
 // Every comment that ends a run carries this marker, so the Ready to Merge relay
 // knows Claude's work on the pull request has finished.
 // It names the head the run ended on, so the relay checks the right commit.
-const done = (head) => `<!-- claude-security-fix:done head=${head} -->`;
+// It also names the comment that asked for this run, so a late marker from an
+// older run cannot end a newer one.
+const asked = /^\d+$/.test(process.env.TRIGGER_COMMENT || "") ? process.env.TRIGGER_COMMENT : "none";
+const done = (head) => `<!-- claude-security-fix:done head=${head} for=${asked} -->`;
 const comment = (n, text) => gh("POST", `issues/${n}/comments`, { body: text });
 
 function fail(why) {

@@ -97,6 +97,10 @@ t("lockfile package names", () => {
   assert.deepEqual([...lockPackageNames("npm", npm)].sort(), ["@s/b", "a", "string-width", "sw"]);
   const pnpm = "lockfileVersion: '9.0'\npackages:\n\n  '@s/b@1.0.0':\n    resolution: {integrity: sha512-x}\n\n  a@2.0.0(react@19.0.0):\n    resolution: {integrity: sha512-y}\n";
   assert.deepEqual([...lockPackageNames("pnpm", pnpm)].sort(), ["@s/b", "a"]);
+  const old6 = "lockfileVersion: '6.0'\npackages:\n\n  /@s/b@1.0.0:\n    resolution: {integrity: sha512-x}\n\n  /a@2.0.0(react@18.0.0):\n    dev: false\n";
+  assert.deepEqual([...lockPackageNames("pnpm", old6)].sort(), ["@s/b", "a"]);
+  const old5 = "lockfileVersion: 5.4\npackages:\n\n  /@s/b/1.0.0:\n    dev: false\n\n  /a/2.0.0_react@18.0.0:\n    dev: false\n";
+  assert.deepEqual([...lockPackageNames("pnpm", old5)].sort(), ["@s/b", "a"]);
   const bun = '{\n  "packages": {\n    "a": ["a@1.0.0", "", {}, "sha512-x"],\n    "@s/b": ["@s/b@2.0.0", "", {}, "sha512-y"],\n  },\n}\n';
   assert.ok(["a", "@s/b"].every((n) => lockPackageNames("bun", bun).has(n)));
 });
@@ -115,6 +119,9 @@ t("paths", () => {
     assert.equal(pathProblems([p], o).length, 1, p);
   }
   assert.equal(pathProblems(["src/a.ts"], { ...o, codePaths: [] }).length, 1);
+  // A path the repository protects stays protected, even if it is a dependency file.
+  assert.equal(pathProblems(["scripts/baseline/package.json"], { ...o, protectedPaths: ["scripts/baseline/package.json"] }).length, 1);
+  assert.equal(pathProblems(["scripts/baseline/package-lock.json"], { ...o, protectedPaths: ["scripts/baseline/"] }).length, 1);
 });
 t("patch shape", () => {
   assert.deepEqual(patchShapeProblems("1\t1\tpackage.json\n3\t2\tpackage-lock.json\n"), { bad: [], paths: ["package.json", "package-lock.json"] });
