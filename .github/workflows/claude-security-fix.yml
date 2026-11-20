@@ -91,7 +91,7 @@ permissions: {}
 
 env:
   # Hash of tools/ at this commit. CI checks it is current (test/tools-hash.sh).
-  KIT_TOOLS_SHA256: 70a229363baa39e4a57c6de2b4b106e85f061b4720f2eb5a5a2fa7bccc7c1d46
+  KIT_TOOLS_SHA256: 98ece3fecc18fba6e955daa8206be391ee796398e014fcac1148bde17d84274e
 
 jobs:
   gate:
@@ -453,7 +453,9 @@ jobs:
           [[ "$WHERE" =~ ^[0-9]+$ ]] || exit 1
           case "$TRIGGER_COMMENT" in ''|*[!0-9]*) TRIGGER_COMMENT=none ;; esac
           {
-            echo "The Claude security fix did not start: $(printf '%s' "$REASON" | tr -cd '\40-\176' | head -c 300)."
+            # Cut first, with no pipe: a closed pipe would stop this step before it posts.
+            why="$(tr -cd '\40-\176' <<<"${REASON:0:300}")"
+            echo "The Claude security fix did not start: $why."
             echo
             echo "Fix that, then comment \`@claude\` here to start again."
             # No run is under way, so the Ready to Merge relay can stop waiting.
@@ -483,7 +485,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          p="$(printf '%s' "$PROBLEMS" | tr -cd '\11\12\40-\176' | head -c 3000 | sed 's/^/- /')"
+          # Cut first, with no early-closing pipe: a closed pipe would stop this step
+          # before it posts the marker.
+          p="$(tr -cd '\11\12\40-\176' <<<"${PROBLEMS:0:3000}" | sed 's/^/- /')"
           {
             echo "The Claude security fix did not finish. Fix: $FIX. Verify: $VERIFY. Publish: $PUBLISH."
             if [ -n "$PROBLEMS" ]; then echo; echo "Verify refused the change:"; echo; echo "$p"; fi

@@ -98,20 +98,31 @@ function rebuildLockfile(d, newPackageJson) {
 }
 
 // Audit counts by severity, measured by the workflow on the final lockfile.
+// Returns null unless the output has the shape of a real audit result. A registry
+// or network failure can also print valid JSON, and that must never count as
+// "no findings".
 export function auditCounts(pmName, json) {
   const sev = { critical: 0, high: 0, moderate: 0, low: 0 };
+  if (!json || typeof json !== "object" || Array.isArray(json)) return null;
+  if ("error" in json || "errors" in json || "code" in json) return null;
   if (pmName === "bun") {
     const seen = new Set();
-    for (const list of Object.values(json || {})) {
-      for (const a of Array.isArray(list) ? list : []) {
+    for (const list of Object.values(json)) {
+      if (!Array.isArray(list)) return null;
+      for (const a of list) {
+        if (!a || typeof a !== "object" || a.id === undefined || typeof a.severity !== "string") return null;
         if (seen.has(a.id)) continue;
         seen.add(a.id);
         if (a.severity in sev) sev[a.severity]++;
       }
     }
   } else {
-    const v = json?.metadata?.vulnerabilities || {};
-    for (const k of Object.keys(sev)) sev[k] = Number(v[k] || 0);
+    const v = json.metadata?.vulnerabilities;
+    if (!v || typeof v !== "object") return null;
+    for (const k of Object.keys(sev)) {
+      if (!Number.isInteger(v[k]) || v[k] < 0) return null;
+      sev[k] = v[k];
+    }
   }
   return sev;
 }

@@ -171,6 +171,15 @@ export function lockPackageNames(pm, text) {
       names.add(k.slice(k.lastIndexOf("node_modules/") + 13).toLowerCase());
       if (v?.name) names.add(String(v.name).toLowerCase());
     }
+    // lockfileVersion 1 has no "packages" map: names sit in a nested "dependencies" tree.
+    const walk = (deps, depth) => {
+      if (!deps || typeof deps !== "object" || depth > 50) return;
+      for (const [k, v] of Object.entries(deps)) {
+        names.add(k.toLowerCase());
+        walk(v?.dependencies, depth + 1);
+      }
+    };
+    walk(l.dependencies, 0);
   } else if (pm === "bun") {
     const l = JSON.parse(stripJsonc(text));
     for (const [k, v] of Object.entries(l.packages || {})) {
@@ -228,6 +237,24 @@ function overridesProblems(ov, label, { lockNames, directNames, nested }) {
   return bad;
 }
 
+// An existing override that points at git, a URL, a file or a workspace must stay
+// exactly as it is. Changing or removing it would change where the code comes from.
+function sourceOverrideProblems(baseOv, nextOv, label) {
+  const bad = [];
+  const walk = (b, n, at, depth) => {
+    if (!b || typeof b !== "object" || Array.isArray(b) || depth > 5) return;
+    for (const [k, v] of Object.entries(b)) {
+      const nv = n && typeof n === "object" ? n[k] : undefined;
+      if (v && typeof v === "object") walk(v, nv, `${at}.${k.slice(0, 80)}`, depth + 1);
+      else if (typeof v === "string" && !isSemverRange(v) && !v.startsWith("$") && nv !== v) {
+        bad.push(`${at}.${k.slice(0, 80)}: does not come from the registry, so it may not change. A person handles it`);
+      }
+    }
+  };
+  walk(baseOv, nextOv, label, 0);
+  return bad;
+}
+
 const stable = (v) =>
   v && typeof v === "object"
     ? Array.isArray(v)
@@ -275,6 +302,11 @@ export function buildPackageJson(baseText, claudeText, { pm, lockNames, label = 
       } else if (!isSemverRange(n[name])) {
         problems.push(`${label} ${f}.${name.slice(0, 80)}: not a semver range`);
         continue;
+      } else if (!isSemverRange(b[name])) {
+        // git, URL, file and workspace sources are not the registry package of the
+        // same name. Swapping one for a registry range could pull in a stranger's code.
+        problems.push(`${label} ${f}.${name.slice(0, 80)}: does not come from the registry, so its source may not change. A person handles it`);
+        continue;
       }
       if (lowers(ba ? ba.range : b[name], na ? na.range : n[name])) {
         problems.push(`${label} ${f}.${name.slice(0, 80)}: lowers the version. A security fix may only raise versions; a person handles a downgrade`);
@@ -286,11 +318,13 @@ export function buildPackageJson(baseText, claudeText, { pm, lockNames, label = 
 
   const ovFields = pm === "pnpm" ? [] : ["overrides", "resolutions"];
   for (const f of ovFields) {
+    problems.push(...sourceOverrideProblems(base[f], next[f], `${label} ${f}`));
     problems.push(...overridesProblems(next[f], `${label} ${f}`, { lockNames, directNames, nested: f === "overrides" && pm === "npm" }));
     if (next[f] === undefined) delete out[f];
     else out[f] = next[f];
   }
   if (pm === "pnpm") {
+    problems.push(...sourceOverrideProblems(base.pnpm?.overrides, next.pnpm?.overrides, `${label} pnpm.overrides`));
     problems.push(...overridesProblems(next.pnpm?.overrides, `${label} pnpm.overrides`, { lockNames, directNames, nested: false }));
     if (next.pnpm?.overrides === undefined) {
       if (out.pnpm) delete out.pnpm.overrides;
@@ -366,13 +400,18 @@ export const ALWAYS_PROTECTED = [
 const rel = (dir, f) => (dir === "." ? f : `${dir.replace(/\/$/, "")}/${f}`);
 export const normCodePaths = (list) => list.filter(Boolean).map((c) => (c.endsWith("/") ? c : c + "/"));
 
-export function pathProblems(paths, { pm, projectDirs, codePaths = [], protectedPaths = [] }) {
-  const bad = [];
+export function dependencyFiles(pm, projectDirs) {
   const deps = new Set();
   for (const d of projectDirs) {
     deps.add(rel(d, "package.json"));
     deps.add(rel(d, LOCKFILES[pm]));
   }
+  return deps;
+}
+
+export function pathProblems(paths, { pm, projectDirs, codePaths = [], protectedPaths = [] }) {
+  const bad = [];
+  const deps = dependencyFiles(pm, projectDirs);
   const prot = [...ALWAYS_PROTECTED, ...protectedPaths];
   const code = normCodePaths(codePaths);
   const hits = (p, list) =>

@@ -27,7 +27,7 @@ The command guard, the sandbox and the permission rules are a second layer. The 
 
 1. Copy `examples/claude.yml` to `.github/workflows/claude-security-fix.yml`. Pin `uses:` and `tools-ref` to the same full commit SHA of this repository.
 2. Set `package-manager`, `project-dirs` and, if wanted, `code-paths` and `protected-paths`.
-3. Add `workflow_dispatch:` to each CI workflow named in `ci-workflows`. Pull requests opened by a workflow do not start CI by themselves.
+3. Add `workflow_dispatch:` to each CI workflow named in `ci-workflows`. Pull requests opened by a workflow do not start CI by themselves. CI runs the branch's code, so keep secrets out of those workflows and give them read-only permissions. If a change includes source files (only possible with `code-paths`), the workflow does not start CI: a person reads the diff and starts it.
 4. In the organisation's Actions settings, tick "Allow GitHub Actions to create and approve pull requests".
 5. Give the repository the `CLAUDE_CODE_OAUTH_TOKEN` secret.
 6. Optional: add `CODEX_REVIEW_TOKEN`, a fine-grained token with only "Pull requests: read and write" on that repository. The publish job uses it to post `@codex review`.

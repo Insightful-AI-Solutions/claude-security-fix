@@ -6,6 +6,7 @@ import {
   isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, neutralise,
   pathProblems, patchShapeProblems, credentialProblems, cleanTitle,
 } from "../tools/checks.mjs";
+import { auditCounts } from "../tools/verify.mjs";
 import { alertIds, taskIds, SECURITY_BRANCH, branchIssue } from "../tools/gate.mjs";
 
 let n = 0;
@@ -92,9 +93,42 @@ t("downgrades are refused", () => {
   assert.match(build({ ...baseObj, dependencies: { ...baseObj.dependencies, a: "0.9.9" } }).problems.join(" "), /lowers the version/);
   assert.match(build({ ...baseObj, dependencies: { ...baseObj.dependencies, sw: "npm:string-width@^4.1.0" } }).problems.join(" "), /lowers the version/);
 });
+t("package.json: a dependency from git, a URL, a file or a workspace keeps its source", () => {
+  for (const src of ["github:acme/a", "git+https://example.com/a.git", "file:../a", "workspace:*", "https://example.com/a.tgz", "acme/a", "latest"]) {
+    const base = JSON.stringify({ name: "x", dependencies: { a: src, t: "1.0.0" }, overrides: { deep: src } }, null, 2) + "\n";
+    const go = (next) => buildPackageJson(base, JSON.stringify(next, null, 2) + "\n", { pm: "npm", lockNames });
+    const b = JSON.parse(base);
+    assert.match(go({ ...b, dependencies: { a: "1.2.3", t: "1.0.0" } }).problems.join(" "), /does not come from the registry/, src);
+    assert.match(go({ ...b, overrides: { deep: "2.0.0" } }).problems.join(" "), /does not come from the registry/, src);
+    assert.match(go({ ...b, overrides: {} }).problems.join(" "), /does not come from the registry/, src);
+    const { overrides, ...noOv } = b;
+    assert.match(go(noOv).problems.join(" "), /does not come from the registry/, src);
+    // Leaving it alone and changing a registry package next to it is still fine.
+    assert.ok(!go({ ...b, dependencies: { a: src, t: "1.0.1" } }).problems.some((x) => /dependencies/.test(x)), src);
+  }
+});
+t("audit output must look like a real audit result", () => {
+  const ok = { metadata: { vulnerabilities: { info: 0, low: 1, moderate: 2, high: 3, critical: 4, total: 10 } } };
+  assert.deepEqual(auditCounts("npm", ok), { critical: 4, high: 3, moderate: 2, low: 1 });
+  assert.deepEqual(auditCounts("pnpm", ok), { critical: 4, high: 3, moderate: 2, low: 1 });
+  for (const bad of [null, [], {}, { error: { code: "ENOTFOUND", summary: "x" } }, { message: "request failed", error: "x" },
+    { metadata: {} }, { metadata: { vulnerabilities: { low: 0, moderate: 0, high: 0 } } }, { metadata: { vulnerabilities: { low: "0", moderate: 0, high: 0, critical: 0 } } },
+    { ...ok, error: { code: "E500" } }]) {
+    assert.equal(auditCounts("npm", bad), null, JSON.stringify(bad));
+    assert.equal(auditCounts("pnpm", bad), null, JSON.stringify(bad));
+  }
+  assert.deepEqual(auditCounts("bun", {}), { critical: 0, high: 0, moderate: 0, low: 0 });
+  assert.deepEqual(auditCounts("bun", { lodash: [{ id: 1, severity: "high" }, { id: 2, severity: "critical" }], other: [{ id: 1, severity: "high" }] }),
+    { critical: 1, high: 1, moderate: 0, low: 0 });
+  for (const bad of [null, [], { error: "fetch failed" }, { message: "x" }, { lodash: "x" }, { lodash: [{ severity: "high" }] }, { lodash: [{ id: 1 }] }]) {
+    assert.equal(auditCounts("bun", bad), null, JSON.stringify(bad));
+  }
+});
 t("lockfile package names", () => {
   const npm = JSON.stringify({ packages: { "": {}, "node_modules/a": {}, "node_modules/x/node_modules/@s/b": {}, "node_modules/sw": { name: "string-width" } } });
   assert.deepEqual([...lockPackageNames("npm", npm)].sort(), ["@s/b", "a", "string-width", "sw"]);
+  const npm1 = JSON.stringify({ lockfileVersion: 1, dependencies: { a: { version: "1.0.0", dependencies: { "@s/b": { version: "2.0.0" } } } } });
+  assert.deepEqual([...lockPackageNames("npm", npm1)].sort(), ["@s/b", "a"]);
   const pnpm = "lockfileVersion: '9.0'\npackages:\n\n  '@s/b@1.0.0':\n    resolution: {integrity: sha512-x}\n\n  a@2.0.0(react@19.0.0):\n    resolution: {integrity: sha512-y}\n";
   assert.deepEqual([...lockPackageNames("pnpm", pnpm)].sort(), ["@s/b", "a"]);
   const old6 = "lockfileVersion: '6.0'\npackages:\n\n  /@s/b@1.0.0:\n    resolution: {integrity: sha512-x}\n\n  /a@2.0.0(react@18.0.0):\n    dev: false\n";

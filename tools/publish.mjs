@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { credentialProblems, neutralise, pathProblems, patchShapeProblems } from "./checks.mjs";
+import { credentialProblems, neutralise, pathProblems, patchShapeProblems, dependencyFiles } from "./checks.mjs";
 import { SECURITY_BRANCH } from "./gate.mjs";
 
 const env = process.env;
@@ -43,7 +43,13 @@ async function gh(method, path, body, token = env.GITHUB_TOKEN) {
 // older run cannot end a newer one.
 const asked = /^\d+$/.test(process.env.TRIGGER_COMMENT || "") ? process.env.TRIGGER_COMMENT : "none";
 const done = (head) => `<!-- claude-security-fix:done head=${head} for=${asked} -->`;
-const comment = (n, text) => gh("POST", `issues/${n}/comments`, { body: text });
+// A comment that fails must fail the job. The report job then posts the marker,
+// so a run never ends without one.
+const comment = async (n, text) => {
+  const r = await gh("POST", `issues/${n}/comments`, { body: text });
+  if (!r.ok) fail(`Could not comment on #${n} (${r.status}).`);
+  return r;
+};
 
 function fail(why) {
   console.error(why);
@@ -138,12 +144,22 @@ async function main() {
   }
 
   // Pull requests and pushes made with this token start no workflows, so start CI directly.
+  // Only for a change to package.json and lockfiles. Source files written by Claude
+  // are checked by path alone, and CI would run them, perhaps beside secrets. A
+  // person reads that diff first and starts CI by hand.
+  const depFiles = dependencyFiles(env.PUB_PM, (env.PUB_DIRS || ".").split(/\s+/).filter(Boolean));
+  const sourceChanged = shape.paths.some((p) => !depFiles.has(p));
+  const workflows = String(env.PUB_CI_WORKFLOWS || "").split(/\s+/).filter(Boolean);
   const notStarted = [];
-  for (const wf of String(env.PUB_CI_WORKFLOWS || "").split(/\s+/).filter(Boolean)) {
-    const r = await gh("POST", `actions/workflows/${encodeURIComponent(wf)}/dispatches`, { ref: branch });
-    if (!r.ok) notStarted.push(`${wf} (${r.status})`);
+  if (!sourceChanged) {
+    for (const wf of workflows) {
+      const r = await gh("POST", `actions/workflows/${encodeURIComponent(wf)}/dispatches`, { ref: branch });
+      if (!r.ok) notStarted.push(`${wf} (${r.status})`);
+    }
   }
-  const ciLine = notStarted.length ? ` CI could not be started for: ${notStarted.join(", ")}.` : "";
+  const ciLine = sourceChanged && workflows.length
+    ? " CI was not started, because this change includes source files. Read the diff first. Then start CI on this branch from the Actions tab."
+    : notStarted.length ? ` CI could not be started for: ${notStarted.join(", ")}.` : "";
   if (followup) await comment(pr, `Pushed ${sha.slice(0, 7)} with Claude's follow-up changes.${ciLine}\n\n${done(sha)}`);
   else {
     await comment(issue, `Opened #${pr} with Claude's fix.${ciLine}`);
