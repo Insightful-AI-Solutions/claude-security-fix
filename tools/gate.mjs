@@ -29,7 +29,9 @@ const out = (k, v) => {
 };
 // tellOn: an issue or pull request number. Set only when a person with write
 // access clearly asked for a fix and a fixed, safe reason explains why it did
-// not start, so the workflow can say so there.
+// not start, so the workflow can say so there. Every such request gets an
+// answer: the answer carries the done marker, which tells the Ready to Merge
+// relay that no Claude run is under way.
 const stop = (why, tellOn = null) => {
   console.log(`Not running: ${why}`);
   out("run", "false");
@@ -122,20 +124,24 @@ async function main() {
   if (!(await canWrite(sender))) stop(`${sender} does not have write access`);
 
   let issue, followup = null, notes = "", checks = [];
+  // From here on a person with write access has asked for a fix, so say why if it stops.
+  let tellOn = null;
   if (name === "issues") {
     if (ev.action !== "labeled" || ev.label?.name !== "security") stop("not the security label being added");
     issue = ev.issue;
     if (!/@claude\b/i.test(issue.body || "")) stop("the issue does not mention @claude");
+    tellOn = Number(issue.number);
   } else if (name === "issue_comment") {
     if (ev.action !== "created") stop("not a new comment");
     if (!/@claude\b/i.test(ev.comment?.body || "")) stop("the comment does not mention @claude");
+    tellOn = Number(ev.issue.number);
     notes = notesFrom(ev.comment.body);
     if (ev.issue.pull_request) {
       const pr = await api(`pulls/${ev.issue.number}`);
-      if (pr.state !== "open") stop("the pull request is not open");
-      if (pr.head?.repo?.full_name !== repoName()) stop("the pull request is from a fork");
-      if (!SECURITY_BRANCH.test(pr.head.ref)) stop("not a security-fix pull request");
-      if (pr.user?.login !== "github-actions[bot]") stop("the pull request was not opened by this workflow");
+      if (pr.state !== "open") stop("the pull request is not open", tellOn);
+      if (pr.head?.repo?.full_name !== repoName()) stop("the pull request is from a fork", tellOn);
+      if (!SECURITY_BRANCH.test(pr.head.ref)) stop("this is not a security-fix pull request", tellOn);
+      if (pr.user?.login !== "github-actions[bot]") stop("the pull request was not opened by this workflow", tellOn);
       // The issue comes from the branch name the workflow chose, never from text.
       issue = await api(`issues/${branchIssue(pr.head.ref)}`);
       followup = { pr: pr.number, branch: pr.head.ref, sha: pr.head.sha };
@@ -148,9 +154,8 @@ async function main() {
     }
   } else stop(`event ${name} is not handled`);
 
-  if (issue.state !== "open") stop("the issue is closed");
-  if (!(issue.labels || []).some((l) => (l.name || l) === "security")) stop("the issue is not labelled security");
-  const tellOn = followup ? followup.pr : issue.number;
+  if (issue.state !== "open") stop("the issue is closed", tellOn);
+  if (!(issue.labels || []).some((l) => (l.name || l) === "security")) stop("the issue is not labelled security", tellOn);
   if (!(await canWrite(issue.user?.login || ""))) stop("the issue was opened by someone without write access", tellOn);
 
   const ids = alertIds(`${issue.title}\n${issue.body || ""}`);

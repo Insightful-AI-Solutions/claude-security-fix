@@ -91,7 +91,7 @@ permissions: {}
 
 env:
   # Hash of tools/ at this commit. CI checks it is current (test/tools-hash.sh).
-  KIT_TOOLS_SHA256: 2eeb65f240a0b4182fa54e968d45c705cade94ce93b312821159ea890c9fe76b
+  KIT_TOOLS_SHA256: 70a229363baa39e4a57c6de2b4b106e85f061b4720f2eb5a5a2fa7bccc7c1d46
 
 jobs:
   gate:
@@ -447,19 +447,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           WHERE: ${{ needs.gate.outputs.tell_on }}
           REASON: ${{ needs.gate.outputs.reason }}
+          TRIGGER_COMMENT: ${{ github.event.comment.id }}
         run: |
           set -euo pipefail
           [[ "$WHERE" =~ ^[0-9]+$ ]] || exit 1
+          case "$TRIGGER_COMMENT" in ''|*[!0-9]*) TRIGGER_COMMENT=none ;; esac
           {
             echo "The Claude security fix did not start: $(printf '%s' "$REASON" | tr -cd '\40-\176' | head -c 300)."
             echo
             echo "Fix that, then comment \`@claude\` here to start again."
+            # No run is under way, so the Ready to Merge relay can stop waiting.
+            echo; echo "<!-- claude-security-fix:done head=unchanged for=$TRIGGER_COMMENT -->"
           } > msg.md
           gh api "repos/$GITHUB_REPOSITORY/issues/$WHERE/comments" -F body=@msg.md --jq .html_url
 
   report:
     needs: [gate, fix, verify, publish]
-    if: always() && needs.gate.outputs.run == 'true' && (needs.fix.result == 'failure' || needs.verify.result == 'failure' || needs.publish.result == 'failure' || needs.fix.result == 'cancelled')
+    # Publish posts the comment that ends a good run. Any other ending, including a
+    # timeout or a cancelled job, is reported here, so every run ends with a marker.
+    if: always() && needs.gate.outputs.run == 'true' && needs.publish.result != 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
