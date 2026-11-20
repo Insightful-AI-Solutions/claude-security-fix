@@ -10,7 +10,7 @@
 //      PUB_DEFAULT_BRANCH, PUB_PM, PUB_DIRS, PUB_CODE_PATHS, PUB_PROTECTED
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { credentialProblems, neutralise, pathProblems, patchShapeProblems, dependencyFiles } from "./checks.mjs";
 import { SECURITY_BRANCH } from "./gate.mjs";
@@ -49,6 +49,17 @@ const comment = async (n, text) => {
   const r = await gh("POST", `issues/${n}/comments`, { body: text });
   if (!r.ok) fail(`Could not comment on #${n} (${r.status}).`);
   return r;
+};
+
+// Tells the workflow which pull request this run is on, as soon as it is known.
+// If a later step fails, the report job then posts on the pull request.
+const tellPr = (n) => {
+  if (env.GITHUB_OUTPUT && /^\d+$/.test(String(n))) appendFileSync(env.GITHUB_OUTPUT, `pr=${n}\n`);
+};
+// The title and body must be current before the run says it finished.
+const setPr = async (n, title, body) => {
+  const r = await gh("PATCH", `pulls/${n}`, { title, body });
+  if (!r.ok) fail(`Could not update pull request #${n} (${r.status}).`);
 };
 
 function fail(why) {
@@ -129,7 +140,7 @@ async function main() {
   let pr;
   if (followup) {
     pr = Number(env.PUB_PR);
-    await gh("PATCH", `pulls/${pr}`, { title: prTitle, body: prBody });
+    await setPr(pr, prTitle, prBody);
   } else {
     const made = await gh("POST", "pulls", { title: prTitle, head: branch, base: env.PUB_DEFAULT_BRANCH, body: prBody });
     if (made.ok) pr = made.json.number;
@@ -139,9 +150,11 @@ async function main() {
       const found = await gh("GET", `pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`);
       pr = found.json?.[0]?.number;
       if (!pr) fail(`Could not open the pull request (${made.status}: ${String(made.json?.message || "").slice(0, 200)}). If it says GitHub Actions is not permitted to create pull requests, turn on "Allow GitHub Actions to create and approve pull requests" in the organisation's and repository's Actions settings. The branch ${branch} was pushed.`);
-      await gh("PATCH", `pulls/${pr}`, { title: prTitle, body: prBody });
+      tellPr(pr);
+      await setPr(pr, prTitle, prBody);
     }
   }
+  tellPr(pr);
 
   // Pull requests and pushes made with this token start no workflows, so start CI directly.
   // Only for a change to package.json and lockfiles. Source files written by Claude

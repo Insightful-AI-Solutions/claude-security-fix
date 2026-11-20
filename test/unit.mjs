@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { allowed } from "../tools/bash-guard.mjs";
 import {
-  isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, neutralise,
+  isSemverRange, lowers, parseAlias, parseStrictJson, registryProblems, buildPackageJson, lockPackageNames, lockVersions, lockDowngrades, compareVersions, neutralise,
   pathProblems, patchShapeProblems, credentialProblems, cleanTitle,
 } from "../tools/checks.mjs";
 import { auditCounts } from "../tools/verify.mjs";
@@ -93,19 +93,47 @@ t("downgrades are refused", () => {
   assert.match(build({ ...baseObj, dependencies: { ...baseObj.dependencies, a: "0.9.9" } }).problems.join(" "), /lowers the version/);
   assert.match(build({ ...baseObj, dependencies: { ...baseObj.dependencies, sw: "npm:string-width@^4.1.0" } }).problems.join(" "), /lowers the version/);
 });
-t("package.json: a dependency from git, a URL, a file or a workspace keeps its source", () => {
+t("package.json: a project with a source outside the registry is out of scope", () => {
   for (const src of ["github:acme/a", "git+https://example.com/a.git", "file:../a", "workspace:*", "https://example.com/a.tgz", "acme/a", "latest"]) {
-    const base = JSON.stringify({ name: "x", dependencies: { a: src, t: "1.0.0" }, overrides: { deep: src } }, null, 2) + "\n";
-    const go = (next) => buildPackageJson(base, JSON.stringify(next, null, 2) + "\n", { pm: "npm", lockNames });
-    const b = JSON.parse(base);
-    assert.match(go({ ...b, dependencies: { a: "1.2.3", t: "1.0.0" } }).problems.join(" "), /does not come from the registry/, src);
-    assert.match(go({ ...b, overrides: { deep: "2.0.0" } }).problems.join(" "), /does not come from the registry/, src);
-    assert.match(go({ ...b, overrides: {} }).problems.join(" "), /does not come from the registry/, src);
-    const { overrides, ...noOv } = b;
-    assert.match(go(noOv).problems.join(" "), /does not come from the registry/, src);
-    // Leaving it alone and changing a registry package next to it is still fine.
-    assert.ok(!go({ ...b, dependencies: { a: src, t: "1.0.1" } }).problems.some((x) => /dependencies/.test(x)), src);
+    for (const base of [{ name: "x", dependencies: { a: src, t: "1.0.0" } }, { name: "x", dependencies: { t: "1.0.0" }, overrides: { deep: src } }]) {
+      const text = JSON.stringify(base, null, 2) + "\n";
+      const go = (next) => buildPackageJson(text, JSON.stringify(next, null, 2) + "\n", { pm: "npm", lockNames });
+      assert.match(go({ ...base, dependencies: { ...base.dependencies, t: "1.0.1" } }).problems.join(" "), /not an npm registry version/, src);
+      assert.match(go({ ...base, dependencies: { ...base.dependencies, a: "1.2.3" }, overrides: { deep: "2.0.0" } }).problems.join(" "), /not an npm registry version/, src);
+    }
   }
+});
+t("package.json: an override may not go down", () => {
+  const base = JSON.stringify({ name: "x", dependencies: { a: "1.0.0" }, overrides: { deep: "4.0.0", a: { deep: "^2.1.0" } } }, null, 2) + "\n";
+  const go = (ov, pm = "npm") => buildPackageJson(base, JSON.stringify({ ...JSON.parse(base), overrides: ov }, null, 2) + "\n", { pm, lockNames });
+  assert.match(go({ deep: "3.0.0", a: { deep: "^2.1.0" } }).problems.join(" "), /lowers the version/);
+  assert.match(go({ deep: "4.0.0", a: { deep: "^2.0.0" } }).problems.join(" "), /lowers the version/);
+  assert.deepEqual(go({ deep: "4.0.1", a: { deep: "^2.1.0" } }).problems, []);
+  const pbase = JSON.stringify({ name: "x", dependencies: { a: "1.0.0" }, pnpm: { overrides: { deep: "4.0.0" } } }, null, 2) + "\n";
+  const r = buildPackageJson(pbase, JSON.stringify({ ...JSON.parse(pbase), pnpm: { overrides: { deep: "3.9.9" } } }, null, 2) + "\n", { pm: "pnpm", lockNames });
+  assert.match(r.problems.join(" "), /lowers the version/);
+});
+t("lockfiles: no package may resolve to an older version", () => {
+  const npm = (vs) => JSON.stringify({ lockfileVersion: 3, packages: { "": {}, "node_modules/a": { version: vs[0] }, "node_modules/x/node_modules/a": { version: vs[1] }, "node_modules/l": { link: true, resolved: "x" } } });
+  assert.deepEqual([...lockVersions("npm", npm(["2.0.0", "1.0.0"])).get("a")].sort(), ["1.0.0", "2.0.0"]);
+  assert.deepEqual(lockDowngrades("npm", npm(["2.0.0", "1.0.0"]), npm(["2.0.1", "1.0.0"])), []);
+  assert.equal(lockDowngrades("npm", npm(["2.0.0", "1.0.0"]), npm(["1.9.0", "1.0.0"])).length, 1);
+  assert.equal(lockDowngrades("npm", npm(["2.0.0", "1.0.0"]), npm(["2.0.0", "0.9.0"])).length, 1);
+  assert.equal(lockDowngrades("npm", npm(["2.0.0", "2.0.0"]), npm(["2.0.0-rc.1", "2.0.0"])).length, 1);
+  const v1 = (v) => JSON.stringify({ lockfileVersion: 1, dependencies: { a: { version: v, dependencies: { b: { version: "1.0.0" } } } } });
+  assert.equal(lockDowngrades("npm", v1("2.0.0"), v1("1.0.0")).length, 1);
+  assert.deepEqual(lockDowngrades("npm", v1("2.0.0"), v1("2.1.0")), []);
+  const pnpm = (v) => `lockfileVersion: '9.0'\npackages:\n\n  '@s/b@${v}':\n    resolution: {integrity: sha512-x}\n\n  a@2.0.0(react@19.0.0):\n    resolution: {integrity: sha512-y}\n`;
+  assert.deepEqual([...lockVersions("pnpm", pnpm("1.5.0")).keys()].sort(), ["@s/b", "a"]);
+  assert.equal(lockDowngrades("pnpm", pnpm("1.5.0"), pnpm("1.4.9")).length, 1);
+  assert.deepEqual(lockDowngrades("pnpm", pnpm("1.5.0"), pnpm("1.5.1")), []);
+  const p6 = (v) => `lockfileVersion: '6.0'\npackages:\n\n  /a@${v}(react@18.0.0):\n    dev: false\n`;
+  const p5 = (v) => `lockfileVersion: 5.4\npackages:\n\n  /a/${v}_react@18.0.0:\n    dev: false\n`;
+  for (const f of [p6, p5]) { assert.equal(lockDowngrades("pnpm", f("3.0.0"), f("2.0.0")).length, 1); assert.deepEqual(lockDowngrades("pnpm", f("3.0.0"), f("3.0.0")), []); }
+  const bun = (v) => `{\n  "packages": {\n    "a": ["a@${v}", "", {}, "sha512-x"],\n    "@s/b": ["@s/b@2.0.0", "", {}, "sha512-y"],\n  },\n}\n`;
+  assert.equal(lockDowngrades("bun", bun("1.5.0"), bun("1.4.0")).length, 1);
+  assert.deepEqual(lockDowngrades("bun", bun("1.5.0"), bun("1.5.0")), []);
+  assert.ok(compareVersions("1.0.0-alpha.2", "1.0.0-alpha.10") < 0 && compareVersions("1.0.0-rc.1", "1.0.0") < 0 && compareVersions("1.10.0", "1.9.0") > 0);
 });
 t("audit output must look like a real audit result", () => {
   const ok = { metadata: { vulnerabilities: { info: 0, low: 1, moderate: 2, high: 3, critical: 4, total: 10 } } };
@@ -143,6 +171,8 @@ t("published text is neutralised", () => {
   assert.ok(!/#12|#3|issues\/4/.test(n), n);
   assert.ok(!/@someone/.test(n) && n.includes("@\u200bsomeone"));
   assert.ok(!n.includes("evil/p.png") && !n.includes("<img"));
+  const r = neutralise("See ![x][leak] and ![leak] and !![y][leak]\n\n[leak]: https://evil/p.png?d=abc\n");
+  assert.ok(!r.includes("!["), r);
 });
 t("paths", () => {
   const o = { pm: "npm", projectDirs: [".", "scripts/baseline"], codePaths: ["src/"], protectedPaths: ["src/content/"] };

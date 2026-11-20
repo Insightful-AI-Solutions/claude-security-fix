@@ -199,6 +199,93 @@ export function lockPackageNames(pm, text) {
   return names;
 }
 
+// Every version of every package in a lockfile: Map of name -> versions.
+// Entries without a plain version (links, git sources) are left out.
+const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+export function lockVersions(pm, text) {
+  const map = new Map();
+  const add = (name, version) => {
+    const v = String(version ?? "");
+    if (!name || !VERSION.test(v)) return;
+    const n = String(name).toLowerCase();
+    if (!map.has(n)) map.set(n, new Set());
+    map.get(n).add(v.replace(/\+.*$/, ""));
+  };
+  if (!text) return map;
+  if (pm === "npm") {
+    const l = JSON.parse(text);
+    for (const [k, v] of Object.entries(l.packages || {})) {
+      if (!k || v?.link) continue;
+      add(v?.name || k.slice(k.lastIndexOf("node_modules/") + 13), v?.version);
+    }
+    const walk = (deps, depth) => {
+      if (!deps || typeof deps !== "object" || depth > 50) return;
+      for (const [k, v] of Object.entries(deps)) {
+        if (!l.packages) add(k, v?.version);
+        walk(v?.dependencies, depth + 1);
+      }
+    };
+    walk(l.dependencies, 0);
+  } else if (pm === "bun") {
+    const l = JSON.parse(stripJsonc(text));
+    for (const v of Object.values(l.packages || {})) {
+      const first = Array.isArray(v) ? String(v[0]) : "";
+      const at = first.lastIndexOf("@");
+      if (at > 0) add(first.slice(0, at), first.slice(at + 1));
+    }
+  } else if (pm === "pnpm") {
+    for (const line of text.split("\n")) {
+      const m = /^ {2}'?\/?((?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*)[@\/](\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=[(_:'+]|$)/i.exec(line);
+      if (m) add(m[1], m[2]);
+    }
+  }
+  return map;
+}
+
+// Orders two plain versions, as semver does. A pre-release sorts before its release.
+export function compareVersions(a, b) {
+  const parse = (v) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(v));
+    return m ? { n: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split(".") : null } : null;
+  };
+  const x = parse(a), y = parse(b);
+  if (!x || !y) return 0;
+  for (let i = 0; i < 3; i++) if (x.n[i] !== y.n[i]) return x.n[i] < y.n[i] ? -1 : 1;
+  if (!x.pre && !y.pre) return 0;
+  if (!x.pre) return 1;
+  if (!y.pre) return -1;
+  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+    const p = x.pre[i], q = y.pre[i];
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    if (p === q) continue;
+    const pn = /^\d+$/.test(p), qn = /^\d+$/.test(q);
+    if (pn && qn) return Number(p) < Number(q) ? -1 : 1;
+    if (pn !== qn) return pn ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return 0;
+}
+
+// The real test for a downgrade: compare what the two lockfiles resolve to. For
+// each package in both, neither its lowest nor its highest version may go down.
+// This catches any range wording that would pull an older release in.
+export function lockDowngrades(pm, baseLock, newLock) {
+  const bad = [];
+  const before = lockVersions(pm, baseLock), after = lockVersions(pm, newLock);
+  const ends = (set) => {
+    const list = [...set].sort(compareVersions);
+    return [list[0], list[list.length - 1]];
+  };
+  for (const [name, versions] of before) {
+    if (!after.has(name)) continue;
+    const [lo, hi] = ends(versions), [nlo, nhi] = ends(after.get(name));
+    if (compareVersions(nhi, hi) < 0) bad.push(`${name} goes down from ${hi} to ${nhi}`);
+    else if (compareVersions(nlo, lo) < 0) bad.push(`${name} gains an older version, ${nlo} (the lowest was ${lo})`);
+  }
+  return bad;
+}
+
 // ---------- package.json ----------
 
 // Names in an override key: "a", "a@^1", "@s/a@1", pnpm's "parent>child" and npm's ".".
@@ -234,6 +321,23 @@ function overridesProblems(ov, label, { lockNames, directNames, nested }) {
     }
   };
   walk(ov, label, 0);
+  return bad;
+}
+
+// An override may not move to a lower version than the one it replaces.
+function overrideDowngrades(baseOv, nextOv, label) {
+  const bad = [];
+  const walk = (b, n, at, depth) => {
+    if (!b || typeof b !== "object" || !n || typeof n !== "object" || depth > 5) return;
+    for (const [k, v] of Object.entries(b)) {
+      const nv = n[k];
+      if (v && typeof v === "object") walk(v, nv, `${at}.${k.slice(0, 80)}`, depth + 1);
+      else if (typeof v === "string" && typeof nv === "string" && nv !== v && lowers(v, nv)) {
+        bad.push(`${at}.${k.slice(0, 80)}: lowers the version. A security fix may only raise versions; a person handles a downgrade`);
+      }
+    }
+  };
+  walk(baseOv, nextOv, label, 0);
   return bad;
 }
 
@@ -283,6 +387,13 @@ export function buildPackageJson(baseText, claudeText, { pm, lockNames, label = 
   } catch (e) {
     return { problems: [`${label}: ${e.message}`] };
   }
+  // This workflow handles npm registry packages only. A project that takes code
+  // from git, a URL, a file or a workspace is out of scope: its lockfile could not
+  // be rebuilt here without fetching from those places.
+  const baseSources = registryProblems(base, label);
+  if (baseSources.length) {
+    return { problems: [`${label} on the default branch uses a source that is not an npm registry version (${baseSources.length} found). This workflow only handles registry packages, so a person handles this fix`] };
+  }
   const out = JSON.parse(JSON.stringify(base));
   const directNames = new Set();
 
@@ -319,12 +430,14 @@ export function buildPackageJson(baseText, claudeText, { pm, lockNames, label = 
   const ovFields = pm === "pnpm" ? [] : ["overrides", "resolutions"];
   for (const f of ovFields) {
     problems.push(...sourceOverrideProblems(base[f], next[f], `${label} ${f}`));
+    problems.push(...overrideDowngrades(base[f], next[f], `${label} ${f}`));
     problems.push(...overridesProblems(next[f], `${label} ${f}`, { lockNames, directNames, nested: f === "overrides" && pm === "npm" }));
     if (next[f] === undefined) delete out[f];
     else out[f] = next[f];
   }
   if (pm === "pnpm") {
     problems.push(...sourceOverrideProblems(base.pnpm?.overrides, next.pnpm?.overrides, `${label} pnpm.overrides`));
+    problems.push(...overrideDowngrades(base.pnpm?.overrides, next.pnpm?.overrides, `${label} pnpm.overrides`));
     problems.push(...overridesProblems(next.pnpm?.overrides, `${label} pnpm.overrides`, { lockNames, directNames, nested: false }));
     if (next.pnpm?.overrides === undefined) {
       if (out.pnpm) delete out.pnpm.overrides;
@@ -378,6 +491,9 @@ export function neutralise(text) {
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/</g, "&lt;")
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "[image removed: $1]")
+    // Any other image form, such as ![x][ref] with a [ref]: URL line. Without the
+    // "!" it is a plain link, which nothing loads until a person clicks it.
+    .replace(/!+(?=\[)/g, "")
     .replace(/\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)(\s*:?\s+)((?:[\w.-]+\/[\w.-]+)?#\d+|https?:\/\/\S+\/(?:issues|pull)\/\d+)/gi, "$1$2(link removed)")
     .replace(/(^|[^\w`])@([A-Za-z0-9][A-Za-z0-9-]*)/g, "$1@​$2");
 }

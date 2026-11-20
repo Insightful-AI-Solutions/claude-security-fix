@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
-  LOCKFILES, buildPackageJson, cleanTitle, credentialProblems, lockPackageNames, neutralise, pathProblems, patchShapeProblems,
+  LOCKFILES, buildPackageJson, cleanTitle, credentialProblems, lockDowngrades, lockPackageNames, neutralise, pathProblems, patchShapeProblems,
 } from "./checks.mjs";
 
 const env = process.env;
@@ -217,6 +217,17 @@ function main() {
         const rebuilt = rebuildLockfile(d, built.text);
         if (rebuilt !== null) writeFileSync(join(ws, rel(d, LOCKFILES[pm])), rebuilt);
         else continue;
+        let downs;
+        try {
+          downs = lockDowngrades(pm, baseLock, rebuilt);
+        } catch {
+          problems.push(`${rel(d, LOCKFILES[pm])}: the rebuilt lockfile could not be read`);
+          continue;
+        }
+        if (downs.length) {
+          problems.push(`${rel(d, LOCKFILES[pm])}: the change lowers a version. A security fix may only raise versions; a person handles a downgrade. ${downs.slice(0, 10).join("; ")}`);
+          continue;
+        }
         const before = audit(d, true), after = audit(d, false);
         if (!before || !after) { problems.push(`${pj}: the audit could not run, so the change could not be checked`); continue; }
         // A rise in critical or high findings is refused. A rise in moderate or low

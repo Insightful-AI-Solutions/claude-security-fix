@@ -91,7 +91,7 @@ permissions: {}
 
 env:
   # Hash of tools/ at this commit. CI checks it is current (test/tools-hash.sh).
-  KIT_TOOLS_SHA256: 98ece3fecc18fba6e955daa8206be391ee796398e014fcac1148bde17d84274e
+  KIT_TOOLS_SHA256: 8aff42de1f8c3669c34940fd384c37e7755b0828f99ad17e52ff0e730e2def27
 
 jobs:
   gate:
@@ -381,6 +381,8 @@ jobs:
       pull-requests: write
       issues: write
       actions: write
+    outputs:
+      pr: ${{ steps.publish.outputs.pr }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -408,7 +410,8 @@ jobs:
         with:
           name: verified-change
           path: ${{ runner.temp }}/bundle
-      - env:
+      - id: publish
+        env:
           GITHUB_TOKEN: ${{ github.token }}
           CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
           TRIGGER_COMMENT: ${{ github.event.comment.id }}
@@ -476,7 +479,8 @@ jobs:
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
-          WHERE: ${{ needs.gate.outputs.pr || needs.gate.outputs.issue }}
+          # The pull request if there is one, even one this run opened before it failed.
+          WHERE: ${{ needs.publish.outputs.pr || needs.gate.outputs.pr || needs.gate.outputs.issue }}
           TRIGGER_COMMENT: ${{ github.event.comment.id }}
           FIX: ${{ needs.fix.result }}
           VERIFY: ${{ needs.verify.result }}
@@ -485,6 +489,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          [[ "$WHERE" =~ ^[0-9]+$ ]] || exit 1
           # Cut first, with no early-closing pipe: a closed pipe would stop this step
           # before it posts the marker.
           p="$(tr -cd '\11\12\40-\176' <<<"${PROBLEMS:0:3000}" | sed 's/^/- /')"
