@@ -62,6 +62,25 @@ const setPr = async (n, title, body) => {
   if (!r.ok) fail(`Could not update pull request #${n} (${r.status}).`);
 };
 
+// The pull request's head as GitHub reports it now, or "unknown".
+const headOf = async (n) => {
+  const r = await gh("GET", `pulls/${n}`);
+  const sha = r.ok ? String(r.json?.head?.sha || "") : "";
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : "unknown";
+};
+// Every file the pull request changes against its base, or null if that cannot
+// be read. A follow-up's own patch is only part of what CI would run.
+const prFiles = async (n) => {
+  const names = [];
+  for (let page = 1; page <= 30; page++) {
+    const r = await gh("GET", `pulls/${n}/files?per_page=100&page=${page}`);
+    if (!r.ok || !Array.isArray(r.json)) return null;
+    for (const f of r.json) names.push(String(f.filename), ...(f.previous_filename ? [String(f.previous_filename)] : []));
+    if (r.json.length < 100) return names;
+  }
+  return null;
+};
+
 function fail(why) {
   console.error(why);
   process.exit(1);
@@ -91,7 +110,8 @@ async function main() {
 
   if (env.PUB_CHANGED !== "true") {
     const where = followup ? Number(env.PUB_PR) : issue;
-    await comment(where, `No change was published on this run.\n\n${body || "(Claude left no notes.)"}\n\n${done("unchanged")}`);
+    // Name the head GitHub reports now. Someone else may have pushed during the run.
+    await comment(where, `No change was published on this run.\n\n${body || "(Claude left no notes.)"}\n\n${done(followup ? await headOf(where) : "unknown")}`);
     console.log("No changes. Posted the notes.");
     return;
   }
@@ -161,7 +181,11 @@ async function main() {
   // are checked by path alone, and CI would run them, perhaps beside secrets. A
   // person reads that diff first and starts CI by hand.
   const depFiles = dependencyFiles(env.PUB_PM, (env.PUB_DIRS || ".").split(/\s+/).filter(Boolean));
-  const sourceChanged = shape.paths.some((p) => !depFiles.has(p));
+  // Judged on the whole pull request, not only this run's patch: an earlier run
+  // may have added source files. If the list cannot be read, assume it has some.
+  const taskFile = String(env.PUB_TASK_FILE || "");
+  const all = await prFiles(pr);
+  const sourceChanged = !all || [...all, ...shape.paths].some((p) => !depFiles.has(p) && p !== taskFile);
   const workflows = String(env.PUB_CI_WORKFLOWS || "").split(/\s+/).filter(Boolean);
   const notStarted = [];
   if (!sourceChanged) {
@@ -171,7 +195,7 @@ async function main() {
     }
   }
   const ciLine = sourceChanged && workflows.length
-    ? " CI was not started, because this change includes source files. Read the diff first. Then start CI on this branch from the Actions tab."
+    ? " CI was not started, because this pull request includes source files. Read the diff first. Then start CI on this branch from the Actions tab."
     : notStarted.length ? ` CI could not be started for: ${notStarted.join(", ")}.` : "";
   if (followup) await comment(pr, `Pushed ${sha.slice(0, 7)} with Claude's follow-up changes.${ciLine}\n\n${done(sha)}`);
   else {

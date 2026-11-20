@@ -92,7 +92,7 @@ permissions: {}
 
 env:
   # Hash of tools/ at this commit. CI checks it is current (test/tools-hash.sh).
-  KIT_TOOLS_SHA256: 293d4942dca648c2d30f53b37617e6828b191b7e5d9b6d97886af324bc1fd174
+  KIT_TOOLS_SHA256: 438cefc9177d0024bd42a313bf4a935c217df2a84fb6683f7f435cf7287332ee
 
 jobs:
   gate:
@@ -482,6 +482,10 @@ jobs:
           set -euo pipefail
           [[ "$WHERE" =~ ^[0-9]+$ ]] || exit 1
           case "$TRIGGER_COMMENT" in ''|*[!0-9]*) TRIGGER_COMMENT=none ;; esac
+          # Name the pull request's head as GitHub reports it now. On an issue, or if
+          # the lookup fails, the head is unknown.
+          head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$WHERE" --jq .head.sha 2>/dev/null || true)"
+          [[ "$head" =~ ^[0-9a-f]{40}$ ]] || head=unknown
           {
             # Cut first, with no pipe: a closed pipe would stop this step before it posts.
             why="$(tr -cd '\40-\176' <<<"${REASON:0:300}")"
@@ -489,7 +493,7 @@ jobs:
             echo
             echo "Fix that, then comment \`@claude\` here to start again."
             # No run is under way, so the Ready to Merge relay can stop waiting.
-            echo; echo "<!-- claude-security-fix:done head=unchanged for=$TRIGGER_COMMENT -->"
+            echo; echo "<!-- claude-security-fix:done head=$head for=$TRIGGER_COMMENT -->"
           } > msg.md
           gh api "repos/$GITHUB_REPOSITORY/issues/$WHERE/comments" -F body=@msg.md --jq .html_url
 

@@ -287,7 +287,13 @@ export function compareVersions(a, b) {
 export function lockResolutions(pm, text) {
   const map = new Map();
   const put = (place, version) => {
-    const v = String(version ?? "").replace(/^'|'$/g, "").replace(/[(_+].*$/, "");
+    let v = String(version ?? "").replace(/^'|'$/g, "");
+    if (pm === "pnpm") {
+      // pnpm writes "2.0.0", "2.0.0(peer@1.0.0)", and for an alias "name@2.0.0",
+      // "/name@2.0.0" or "/name/2.0.0_peer@1.0.0". Take the first version in it.
+      const m = /(?:^|[@\/])(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=$|[(_+])/.exec(v);
+      v = m ? m[1] : "";
+    } else v = v.replace(/[(_+].*$/, "");
     if (VERSION.test(v)) map.set(place, v);
   };
   if (!text) return map;

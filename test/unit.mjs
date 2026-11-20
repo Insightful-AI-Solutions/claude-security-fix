@@ -155,6 +155,14 @@ t("lockfiles: no package may resolve to an older version", () => {
   assert.equal(lockResolutions("pnpm", p9("2.0.0", "1.0.0")).get(".|@s/b"), "1.0.0");
   assert.equal(lockDowngrades("pnpm", p9("2.0.0", "1.0.0"), p9("1.0.0", "3.0.0")).length, 1);
   assert.deepEqual(lockDowngrades("pnpm", p9("2.0.0", "1.0.0"), p9("2.0.1", "1.0.0")), []);
+  // Two aliases of one package: one goes down while the other goes up.
+  const pal = (x, y) => `lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      one:\n        specifier: npm:foo@>=1 <3\n        version: foo@${x}\n      two:\n        specifier: npm:foo@^1\n        version: foo@${y}(react@19.0.0)\n\npackages:\n\n  foo@${x}:\n    resolution: {integrity: sha512-x}\n\n  foo@${y}:\n    resolution: {integrity: sha512-y}\n`;
+  assert.equal(lockResolutions("pnpm", pal("2.0.0", "1.0.0")).get(".|one"), "2.0.0");
+  assert.equal(lockResolutions("pnpm", pal("2.0.0", "1.0.0")).get(".|two"), "1.0.0");
+  assert.equal(lockDowngrades("pnpm", pal("2.0.0", "1.0.0"), pal("1.0.0", "3.0.0")).length, 1);
+  const pal6 = (x) => `lockfileVersion: '6.0'\n\ndependencies:\n  one:\n    specifier: npm:foo@^1\n    version: /foo@${x}\n`;
+  const pal5 = (x) => `lockfileVersion: 5.4\n\ndependencies:\n  one: /foo/${x}_react@18.0.0\n`;
+  for (const f of [pal6, pal5]) { assert.equal(lockResolutions("pnpm", f("2.0.0")).get(".|one"), "2.0.0"); assert.equal(lockDowngrades("pnpm", f("2.0.0"), f("1.9.0")).length, 1); }
   const p5d = (v) => `lockfileVersion: 5.4\n\nspecifiers:\n  a: ^1.0.0\n\ndependencies:\n  a: ${v}\n\npackages:\n\n  /a/${v}:\n    dev: false\n\n  /a/9.0.0:\n    dev: false\n`;
   assert.equal(lockResolutions("pnpm", p5d("2.0.0")).get(".|a"), "2.0.0");
   assert.equal(lockDowngrades("pnpm", p5d("2.0.0"), p5d("1.0.0")).length, 1);
