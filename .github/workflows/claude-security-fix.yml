@@ -92,7 +92,7 @@ permissions: {}
 
 env:
   # Hash of tools/ at this commit. CI checks it is current (test/tools-hash.sh).
-  KIT_TOOLS_SHA256: 306417ed76918330e30c0059655a3191eb60d4a33fcc82e3965a9b12308b7199
+  KIT_TOOLS_SHA256: 8b1a3e8fb97dbd4c61c942371369d8bd990f2bcee8008b0712f161eb3250f022
 
 jobs:
   gate:

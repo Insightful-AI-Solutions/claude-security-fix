@@ -205,11 +205,14 @@ async function main() {
   // Codex does not review pull requests opened by the workflow token, and does not
   // answer the workflow bot. With CODEX_REVIEW_TOKEN (a person's fine-grained token
   // that can only write pull request comments) the request comes from that person.
+  // The bot's own comments must never hold the trigger text: Codex still reads it
+  // as a request from the bot, which needs workspace credits, and refuses.
+  const howToAsk = "To start it, a person should comment the words codex review, with @ in front of codex.";
   if (env.CODEX_REVIEW_TOKEN) {
     const asked = await gh("POST", `issues/${pr}/comments`, { body: "@codex review" }, env.CODEX_REVIEW_TOKEN);
-    if (!asked.ok) await comment(pr, `Could not ask Codex to review (${asked.status}). Comment \`@codex review\` to start it.`);
+    if (!asked.ok) await comment(pr, `Could not ask Codex to review (${asked.status}). ${howToAsk}`);
   } else {
-    await comment(pr, "Comment `@codex review` to start Codex's review: it does not start on its own for pull requests this workflow opens.");
+    await comment(pr, `Codex's review has not started. It does not start on its own for pull requests this workflow opens. ${howToAsk}`);
   }
   console.log(`Published ${sha} to ${branch}, pull request #${pr}.${ciLine}`);
 }
